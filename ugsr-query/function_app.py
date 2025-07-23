@@ -43,7 +43,8 @@ share_point_urls = {
 # Feature On/Off flags
 debug_mode = True   # Set to True to enable debug prints
 custom_ranking = True   # Set to True to enable custom ranking (vector + keyword); False to use Azure default ranking
-dynamic_filtering = False   # Set to True to enable dynamic metadata filtering based on query keywords    
+dynamic_filtering = False   # Set to True to enable dynamic metadata filtering based on query keywords
+keywords_matching = True   # Set to True to enable keyword matching check and warning    
 metadata_search = True    # Set to True to enable metadata-only search for relevant queries
 use_prev_context = True   # Set to True to enable the feature that uses previous queries as context
 
@@ -279,7 +280,7 @@ def should_use_metadata_search(query):
             "role": "system",
             "content": (
                 "You are a router. Your job is to decide whether a query should be answered by:\n"
-                "- metadata: if it asks for listings, filenames, titles, document types, categories, release version, revision date, release data, owner etc.\n"
+                "- metadata: if it asks for listings, like filenames, titles, document types, categories, release version, revision date, release data of the documents in the resources etc.\n"
                 "- semantic: if it needs detailed answers from document content.\n"
                 "If the query is ambiguous or general, prefer semantic.\n"
                 "If the query contains words like 'metadata', choose metadata. If the query contains words like 'content', choose semantic.\n"
@@ -300,6 +301,37 @@ def should_use_metadata_search(query):
     decision = response.choices[0].message.content.strip().lower()
     print(f"* Routing decision: {decision} *\n")
     return decision == "metadata"
+
+
+def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI_DEPLOYMENT):
+    """
+    Uses LLM to confirm whether the provided context actually answers the user's query.
+    Returns a tuple (is_valid, explanation)
+    """
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a validation agent. Your job is to decide if the provided CONTEXT truly answers the USER QUESTION.\n"
+            "Be strict. If the context uses different terms, systems, or services than the question, reply 'no'.\n"
+            "Do not infer answers. Only consider exact term matches.\n"
+            "Your reply must start with 'yes' or 'no'. Then give a brief reason why."
+        )
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"USER QUESTION: {query}\n\n"
+            f"CONTEXT: {context_text}\n\n"
+            f"Does the context fully and specifically answer the question based on term and system alignment?"
+        )
+    }
+    response = client.chat.completions.create(
+        model=deployment,
+        messages=[system_msg, user_msg]
+    )
+    answer = response.choices[0].message.content.strip().lower()
+    is_valid = answer.startswith("yes")
+    return is_valid, answer
 
 
 def metadata_table_by_index(index_names):
@@ -426,7 +458,8 @@ def summarize_full_metadata(query, previous_queries, metadata_by_index, use_prev
     return  f"**Answer:**\n\n{reference_links} \n\n\n\n {summary}"         
 
 
-def multi_index_search_documents(query, index_names, previous_queries, vector_weight=0.6, top_k=6, dynamic_filtering=True, custom_ranking=True, use_previous_context=True, debug=False):
+def multi_index_search_documents(query, index_names, previous_queries, vector_weight=0.6, top_k=6, 
+                                 dynamic_filtering=True, keywords_matching=True, custom_ranking=True, use_previous_context=True, debug=False):
     """
     Performs hybrid search across multiple indexes.
     Args:
@@ -434,8 +467,11 @@ def multi_index_search_documents(query, index_names, previous_queries, vector_we
         index_names (list): List of Azure Search index names.
         vector_weight (float): Weight for vector similarity in final ranking [0.0 - 1.0].
         top_k (int): Number of top documents to return per index.
-        debug (bool): If True, print debug output
+        dynamic_filtering (bool): If True, apply dynamic metadata filtering based on query keywords.
+        keywords_matching (bool): If True, check if keywords are present in retrieved documents and warn if missing.
         custom_ranking (bool): If True, manually calculate final score using vector + keyword; otherwise use Azure's ranking.
+        use_previous_context (bool): If True, rewrite current query using previous queries as context.
+        debug (bool): If True, print debug output
     Returns:
         list of documents with relevance scores and index tags.
     """
@@ -459,7 +495,7 @@ def multi_index_search_documents(query, index_names, previous_queries, vector_we
         rewrited_query = query
 
     optimized_query = llm_search_query_optimizer(query, previous_queries, use_previous_context)
-    keywords = extract_keywords(query, optimized_query, debug=debug)
+    keywords = extract_keywords(query, optimized_query, debug=debug) if keywords_matching else None
     query_em = get_query_embedding(optimized_query)
 
     all_results = []
@@ -496,7 +532,7 @@ def multi_index_search_documents(query, index_names, previous_queries, vector_we
             ]
         }
 
-        if dynamic_filtering: 
+        if dynamic_filtering and keywords_matching: 
             # Apply dynamic metadata filtering
             generate_field_based_filter(headers, payload, index_name, keywords, filter_fields=metadata_filter_fields)
             if debug:
@@ -566,15 +602,15 @@ def multi_index_search_documents(query, index_names, previous_queries, vector_we
     final_results = [doc for doc in all_results if doc["_index"] == best_index]
     final_results = sorted(final_results, key=lambda d: d["_final_score"], reverse=True)[:8]  # Return top 8 as final answer
 
-    # --- Check for missing keywords ---
-    combined_text = " ".join(all_content)
-    missing_keywords = [kw for kw in keywords if kw not in combined_text]
+    warning_msg = ""
+    if keywords_matching:
+        # --- Check for missing keywords ---
+        combined_text = " ".join(all_content)
+        missing_keywords = [kw for kw in keywords if kw not in combined_text]
 
-    if missing_keywords:
-        warning_msg = f"Keyword search indicates the following words are not found in any relevant documents: '{', '.join(missing_keywords)}'. You can ignore this message or consider rephrasing your question."
-    else:
-        warning_msg = ""
-
+        if missing_keywords:
+            warning_msg = f"Keyword search indicates the following words are not found in any relevant documents: '{', '.join(missing_keywords)}'. You can ignore this message or consider rephrasing your question."
+        
     # Final results with warning if needed
     final_answer = warning_msg, final_results
     return rewrited_query, final_answer
@@ -616,31 +652,44 @@ def multi_index_generate_response(query, context):
     
     # --- Build context string for LLM to generate main answer ---
     context_str = "\n\n".join(context_texts)
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                f"Answer the following question using the context from the top relevant documents:\n"
-                f"QUESTION: {query}\n\n"
-                f"DOCUMENT CHUNKS:\n{context_str}\n\n"
-                f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
-                # f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
-                f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
-                f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
-                f"- Use plain text with no HTML.\n"
-                f"- Separate sections with line breaks."
-            )
-        }
-    ]
 
-    completion = client.chat.completions.create(
-        model=AZURE_OPENAI_DEPLOYMENT,
-        messages=messages
-    )
+    # Run LLM-based validation
+    is_valid, explanation = llm_context_guard_check(query, context_str, client)
+    explanation = ' '.join(explanation.strip().split()[1:])   # cleaning the explanation by deleting the first word - yes or no
+    if not is_valid:
+        main_answer = (
+                        "Sorry, I cannot help with that. The provided documents do not clearly explain the requested information.\n"
+                        f"(Reason: {explanation})"
+        )
+    
+    else:
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    f"Answer the following question using the context from the top relevant documents:\n"
+                    f"QUESTION: {query}\n\n"
+                    f"DOCUMENT CHUNKS:\n{context_str}\n\n"
+                    f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
+                    # f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
+                    f"If the answer is not clearly stated in the provided context, or you are unsure, respond with: 'Sorry, I cannot help with that.' Then briely expalain reasoning."
+                    f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
+                    f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
+                    f"- Use plain text with no HTML.\n"
+                    f"- Separate sections with line breaks."
+                )
+            }
+        ]
 
-    main_answer = completion.choices[0].message.content.strip()
+        completion = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            messages=messages
+        )
+
+        main_answer = completion.choices[0].message.content.strip()
+    
     if warning_msg:
-        main_answer = f"Reminder: {warning_msg.strip()}" + "\n\n" + main_answer
+            main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
 
     # --- Build reference section ---
     reference_text = "\n\n**References:**\n"
@@ -657,6 +706,7 @@ def multi_index_generate_response(query, context):
         relevance_prompt = [
             {
                 "role": "user",
+                
                 "content": (
                     f"Be concise, Summarize in less than 150 words why this document is relevant to the question below, "
                     f"based only on the document's summary, key topics, and key terms. "
@@ -711,8 +761,11 @@ def multiindexquery(req: func.HttpRequest) -> func.HttpResponse:
 
         # Step 1: Search all indexes
         rewrited_query, docs = multi_index_search_documents(cleaned_query, index_names, cleaned_query_history, vector_weight=0.5, top_k=16, 
-                                            dynamic_filtering=dynamic_filtering, custom_ranking=custom_ranking, 
-                                            use_previous_context=use_prev_context, debug=debug_mode)
+                                                            dynamic_filtering=dynamic_filtering, 
+                                                            keywords_matching = keywords_matching,
+                                                            custom_ranking=custom_ranking, 
+                                                            use_previous_context=use_prev_context, 
+                                                            debug=debug_mode)
         if not docs:
             return func.HttpResponse("No relevant documents found.", status_code=404)
         
