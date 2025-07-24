@@ -47,6 +47,7 @@ dynamic_filtering = False   # Set to True to enable dynamic metadata filtering b
 keywords_matching = True   # Set to True to enable keyword matching check and warning    
 metadata_search = True    # Set to True to enable metadata-only search for relevant queries
 use_prev_context = True   # Set to True to enable the feature that uses previous queries as context
+hide_ref_relevance = True # Set to True to hide relevance explanation in the reference section
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -54,6 +55,7 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "contents"}):
     """
     Removes standalone routing keywords from the query if they are not part of a sentence.
+    Argument:  raw_query  -  can be single query or query history (sperated by '|')
     """
     try:
         # Normalize and split query into clauses using punctuation
@@ -70,47 +72,115 @@ def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "conte
                 continue
             cleaned.append(stripped)
 
-        return '. '.join(cleaned).strip()
+        if '|' in raw_query:   # If input is query history (sperated by '|')
+            return '| '.join(cleaned).strip()
+        
+        else:   #  If inout is single query
+            return '. '.join(cleaned).strip()
     
     except Exception as e:
         logging.error(f"Error cleaning query: {e}")
         return raw_query
 
 
-def rewrite_query_with_history(current_query, previous_queries):
+def filter_relevant_history(current_query, query_history, answer_history):
     """
-    Use LLM to rewrite the current query with context from previous queries.
-    Ensures vague or reference-based language is clarified.
+    Filters relevant user-bot turns from chat history based on the current query.
+    Returns a list of relevant exchanges (dicts with 'user' and 'bot').
     """
-    if not previous_queries:
-        return current_query
-    
+    if not current_query.strip():
+        return ""
+
+    queries = [q.strip() for q in query_history.split("|") if q.strip()]
+    answers = [a.strip() for a in answer_history.split("|") if a.strip()]
+
+    history_turns = []
+    max_len = max(len(queries), len(answers))
+
+    for i in range(max_len):
+        user = queries[i] if i < len(queries) else None
+        bot = answers[i] if i < len(answers) else None
+        turn_number = i+1
+        turn_lines = [f"Turn {turn_number}:"]
+        if user and bot:
+            turn_lines.append(f"User: {user}\nBot: {bot}")
+        elif user:
+            turn_lines.append(f"User: {user}")
+        elif bot:
+            turn_lines.append(f"Bot: {bot}")
+
+        history_turns.append("\n".join(turn_lines))
+
+    if not history_turns:
+        return ""
+
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_API_KEY,
         api_version="2024-12-01-preview"
     )
 
+    transcript = "\n\n".join(history_turns)
+
     prompt = (
-        "You are a query rewriter. A user is asking a follow-up question, and you are given some of their previous questions.\n"
-        "Your task is to rewrite the current question clearly and fully, incorporating relevant context from previous questions.\n"
-        "If the current question includes vague references like 'it' or 'that', make them explicit.\n"
-        "Do NOT answer any questions.\n"
-        "Return only the rewritten version of the current question.\n\n"
-        f"PREVIOUS QUESTIONS:\n{previous_queries}\n\n"
+        "You are an assistant that filters past chat history to keep only what is useful for understanding the current question.\n"
+        "Each turn may include a user question, a bot answer, or both.\n"
+        "Your task is to return only the relevant items from the history that help clarify or add context to the current question.\n"
+        "Ignore unrelated entries.\n\n"
+        "If the CURRENT QUESTION appears vague (e.g., contains 'it' or 'that'), lacking of context and reference. In this case, "
+        "prioritize the most recent turns (e.g., Turn 5 is newer than Turn 1) that might clarify those references, and ignore older, unrelated entries.\n"
+        f"CURRENT QUESTION:\n{current_query}\n\n"
+        f"PAST HISTORY:\n{transcript}"
+    )
+
+    response = client.chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def rewrite_query_with_history(current_query, relevant_history_text):
+    """
+    Rewrites the current query using relevant chat history for clarity.
+    """
+    if not relevant_history_text or not current_query.strip():
+        return current_query
+
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version="2024-12-01-preview"
+    )
+
+    system_prompt = (
+        "You are a smart query cleaner and rewriter. A user is asking a question that may refer to earlier exchanges.\n"
+        "You are given the current question and a relevant excerpt from prior user and assistant turns.\n"
+        "Your job is to:\n"
+        "- Clarify the current question by resolving any vague terms (e.g., 'it', 'this', 'that', 'these', 'those', 'they', 'the one') using the history.\n"
+        "- Keep only what is necessary to make the current query clear.\n"
+        "- Do not list the history or answer the question.\n"
+        "Return only the rewritten version of the current question."
+    )
+
+    user_prompt = (
+        f"RELEVANT HISTORY:\n{relevant_history_text}\n\n"
         f"CURRENT QUESTION:\n{current_query}"
     )
 
     response = client.chat.completions.create(
         model=AZURE_OPENAI_DEPLOYMENT,
         messages=[
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
     )
+
     return response.choices[0].message.content.strip()
 
 
-def llm_search_query_optimizer(query, previous_queries, use_previous_context):
+def llm_search_query_optimizer(query, rewrited_query, use_previous_context):
     system_prompt = f"You are a search query optimizer. \
         Read the user question and extract the key words to generate search queries to improve semantic matching for vector search.\
         Make sure your rewritten query includes all important original terms (do not drop any).\
@@ -125,8 +195,8 @@ def llm_search_query_optimizer(query, previous_queries, use_previous_context):
         api_version="2024-12-01-preview"
     )
 
-    if previous_queries and use_previous_context:
-        query_input = f"Context: {previous_queries}\nOriginal query: {query}"
+    if rewrited_query and use_previous_context:
+        query_input = f"Context: {rewrited_query}\nOriginal query: {query}"
     else:
         query_input = f"Original query: {query}"
     
@@ -141,6 +211,7 @@ def llm_search_query_optimizer(query, previous_queries, use_previous_context):
 
     optimized_query = response.choices[0].message.content.strip().lower()
     return optimized_query
+
 
 def get_query_embedding(query):
     client = AzureOpenAI(
@@ -392,17 +463,12 @@ def metadata_table_by_index(index_names):
     return metadata_by_index
 '''
 
-def summarize_full_metadata(query, previous_queries, metadata_by_index, use_previous_context=True):
+def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_API_KEY,
         api_version="2024-12-01-preview"
     )
-
-    if use_previous_context:     # rewrite current query according to the query history
-        rewrited_query = rewrite_query_with_history(query, previous_queries)
-    else:
-        rewrited_query = query
 
     index_contexts = []
     for index_name, docs in metadata_by_index.items():
@@ -413,37 +479,28 @@ def summarize_full_metadata(query, previous_queries, metadata_by_index, use_prev
         index_contexts.append("\n".join(context_lines))
     full_context = "\n\n".join(index_contexts)
 
-    messages = []
-    messages.append({
-        "role": "system",
-        "content": (
-            "You are a helpful assistant that summarizes document metadata. "
-            "The user may ask follow-up questions based on earlier queries."
-        )
-    })
+    history_prefix = (
+        f"RELEVANT CHAT HISTORY:\n{relevant_history_text}\n\n"
+        if relevant_history_text else ""
+    )
 
-    # Optional prior user queries (as memory)
-    messages.append({
-            "role": "user",
-            "content": f"Previous queries: {previous_queries}"
-        })
+    prompt = (
+        f"You are an assistant that summarizes document metadata.\n"
+        f"{history_prefix}"
+        f"USER QUERY:\n{query}\n\n"
+        f"DOCUMENT METADATA:\n{full_context}\n\n"
+        f"Instructions:\n"
+        f"- Use history only if it helps clarify the current query.\n"
+        f"-Only answer the current query. Do not answer or repeat previous questions.\n"
+        f"-If the query mentions a specific index, only summarize that index. Otherwise, summarize all indexes.\n"
+        f"-list as many relevant documents as possible that match the user query.\n"
+        f"-If you are not sure about the answer or nothing relevant is found, say 'Sorry, I cannot help with it. Please try looking it up on above share point links'.\n"
+        f"-Use clear bullet points or sections."
+    )
     
-    messages.append({
-            "role": "user",
-            "content": (
-                f"User current query: {rewrited_query}\n\n"
-                f"Here is all available metadata grouped by index:\n\n{full_context}\n\n"
-                f"Only answer the current query. Do not answer or repeat previous questions.\n"
-                f"If the query mentions a specific index, only summarize that index. Otherwise, summarize all indexes.\n"
-                f"list as many relevant documents as possible that match the user query.\n"
-                f"If you are not sure about the answer or nothing relevant is found, say 'Sorry, I cannot help with it. Please try looking it up on above share point links'.\n"
-                f"Use clear bullet points or sections."
-            )
-        })
-
     completion = client.chat.completions.create(
         model=AZURE_OPENAI_DEPLOYMENT,
-        messages=messages
+        messages=[{"role": "user", "content": prompt}]
     )
     summary = completion.choices[0].message.content.strip()
 
@@ -458,8 +515,9 @@ def summarize_full_metadata(query, previous_queries, metadata_by_index, use_prev
     return  f"**Answer:**\n\n{reference_links} \n\n\n\n {summary}"         
 
 
-def multi_index_search_documents(query, index_names, previous_queries, vector_weight=0.6, top_k=6, 
-                                 dynamic_filtering=True, keywords_matching=True, custom_ranking=True, use_previous_context=True, debug=False):
+def multi_index_search_documents(query, rewrited_query, index_names, vector_weight=0.6, top_k=6, 
+                                 dynamic_filtering=True, keywords_matching=True, custom_ranking=True, 
+                                 use_previous_context = True, debug=False):
     """
     Performs hybrid search across multiple indexes.
     Args:
@@ -489,13 +547,8 @@ def multi_index_search_documents(query, index_names, previous_queries, vector_we
     metadata_filter_fields = ["doc_type", "doc_category", "doc_function"]
     vector_field = "content_embedding"
     
-    if use_previous_context:     # rewrite current query according to the query history
-        rewrited_query = rewrite_query_with_history(query, previous_queries)
-    else:
-        rewrited_query = query
-
-    optimized_query = llm_search_query_optimizer(query, previous_queries, use_previous_context)
-    keywords = extract_keywords(query, optimized_query, debug=debug) if keywords_matching else None
+    optimized_query = llm_search_query_optimizer(query, rewrited_query, use_previous_context)
+    keywords = extract_keywords(query, optimized_query, debug=debug_mode) if keywords_matching else None
     query_em = get_query_embedding(optimized_query)
 
     all_results = []
@@ -613,10 +666,10 @@ def multi_index_search_documents(query, index_names, previous_queries, vector_we
         
     # Final results with warning if needed
     final_answer = warning_msg, final_results
-    return rewrited_query, final_answer
+    return final_answer
 
 
-def multi_index_generate_response(query, context):
+def multi_index_generate_response(query, context, hide_ref_relevance):
     """
     Generates an answer using OpenAI's o3-mini model with the top chunks, and includes a formatted reference section
     with relevance explanations based on each document's content, summary, topics, and terms.
@@ -661,9 +714,12 @@ def multi_index_generate_response(query, context):
                         "Sorry, I cannot help with that. The provided documents do not clearly explain the requested information.\n"
                         f"(Reason: {explanation})"
         )
+        
+        if warning_msg:
+            main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
+        return f"**Answer:**\n\n{main_answer}"
     
-    else:
-        messages = [
+    messages = [
             {
                 "role": "user",
                 "content": (
@@ -681,12 +737,12 @@ def multi_index_generate_response(query, context):
             }
         ]
 
-        completion = client.chat.completions.create(
+    completion = client.chat.completions.create(
             model=AZURE_OPENAI_DEPLOYMENT,
             messages=messages
-        )
+    )
 
-        main_answer = completion.choices[0].message.content.strip()
+    main_answer = completion.choices[0].message.content.strip()
     
     if warning_msg:
             main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
@@ -695,6 +751,15 @@ def multi_index_generate_response(query, context):
     reference_text = "\n\n**References:**\n"
 
     for doc in list(doc_groups.values())[:3]:
+        if hide_ref_relevance:
+            reference_text += (
+                f"\n---\n"
+                f"**Document Title**: {doc['document_name']}\n\n"
+                f"**Key Contact**: {doc['key_contact']}\n\n"
+                f"**URL**: {doc['url']}\n\n"
+            )
+            continue
+
         # Build a focused relevance summary prompt
         relevance_context = (
             f"QUESTION: {query}\n\n"
@@ -745,32 +810,39 @@ def multiindexquery(req: func.HttpRequest) -> func.HttpResponse:
     try:
         req_body = req.get_json()
         query = req_body.get("query")
-        query_history = req_body.get("context")
-
+        query_history = req_body.get("context", "")
+        answer_history = req_body.get("answer_history", "")
         if not query:
             return func.HttpResponse("Error: Missing 'query' parameter", status_code=400)
 
-        cleaned_query = clean_query_for_llm(query)  # Clean query by removing routing keywords
+        cleaned_query = clean_query_for_llm(query)  # Clean query by removing routing keywords if there are any
         cleaned_query_history = clean_query_for_llm(query_history)
+
+        history_context = filter_relevant_history(cleaned_query, cleaned_query_history, answer_history)
+        if use_prev_context:
+            rewrited_query = rewrite_query_with_history(cleaned_query, history_context)
+        else:
+            rewrited_query = cleaned_query
+
         if metadata_search:
             use_metadata_search_flag = should_use_metadata_search(query)    # use raw query for routing decision
             if use_metadata_search_flag:
                 metadata_by_index = metadata_table_by_index(index_names)
-                llm_summary = summarize_full_metadata(cleaned_query, cleaned_query_history, metadata_by_index, use_previous_context=use_prev_context)        
+                llm_summary = summarize_full_metadata(rewrited_query, history_context, metadata_by_index)        
                 return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
         # Step 1: Search all indexes
-        rewrited_query, docs = multi_index_search_documents(cleaned_query, index_names, cleaned_query_history, vector_weight=0.5, top_k=16, 
+        docs = multi_index_search_documents(cleaned_query, rewrited_query, index_names, vector_weight=0.5, top_k=16, 
                                                             dynamic_filtering=dynamic_filtering, 
                                                             keywords_matching = keywords_matching,
+                                                            use_previous_context = use_prev_context,    
                                                             custom_ranking=custom_ranking, 
-                                                            use_previous_context=use_prev_context, 
                                                             debug=debug_mode)
         if not docs:
             return func.HttpResponse("No relevant documents found.", status_code=404)
         
         # Step 2: Generate response from AI with retrieved context
-        ai_response = multi_index_generate_response(rewrited_query, docs)
+        ai_response = multi_index_generate_response(rewrited_query, docs, hide_ref_relevance=hide_ref_relevance)
 
         return func.HttpResponse(json.dumps({"answer": ai_response}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
