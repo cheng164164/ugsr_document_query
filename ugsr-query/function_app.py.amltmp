@@ -279,7 +279,7 @@ def should_use_metadata_search(query):
             "role": "system",
             "content": (
                 "You are a router. Your job is to decide whether a query should be answered by:\n"
-                "- metadata: if it asks for listings, filenames, document types, categories, edit date, etc.\n"
+                "- metadata: if it asks for listings, like filenames, titles, document types, categories, release version, revision date, release data of the documents in the resources etc.\n"
                 "- semantic: if it needs detailed answers from document content.\n"
                 "If the query is ambiguous or general, prefer semantic.\n"
                 "If the query contains words like 'metadata', choose metadata. If the query contains words like 'content', choose semantic.\n"
@@ -300,6 +300,37 @@ def should_use_metadata_search(query):
     decision = response.choices[0].message.content.strip().lower()
     print(f"* Routing decision: {decision} *\n")
     return decision == "metadata"
+
+
+def llm_context_guard_check(query, context_text, client, deployment="o3-mini"):
+    """
+    Uses LLM to confirm whether the provided context actually answers the user's query.
+    Returns a tuple (is_valid, explanation)
+    """
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a validation agent. Your job is to decide if the provided CONTEXT truly answers the USER QUESTION.\n"
+            "Be strict. If the context only partially matches, say 'no'.\n"
+            "Your reply must start with 'yes' or 'no'. Then give a brief reason why.\n"
+            "Only consider the CONTEXT. Do not make assumptions beyond it."
+        )
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"USER QUESTION: {query}\n\n"
+            f"CONTEXT: {context_text}\n\n"
+            f"Does the context fully and specifically answer the question?"
+        )
+    }
+    response = client.chat.completions.create(
+        model=deployment,
+        messages=[system_msg, user_msg]
+    )
+    answer = response.choices[0].message.content.strip().lower()
+    is_valid = answer.startswith("yes")
+    return is_valid, answer
 
 
 def metadata_table_by_index(index_names):
@@ -360,12 +391,18 @@ def metadata_table_by_index(index_names):
     return metadata_by_index
 '''
 
-def summarize_full_metadata(query, metadata_by_index):
+def summarize_full_metadata(query, previous_queries, metadata_by_index, use_previous_context=True):
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_API_KEY,
         api_version="2024-12-01-preview"
     )
+
+    if use_previous_context:     # rewrite current query according to the query history
+        rewrited_query = rewrite_query_with_history(query, previous_queries)
+    else:
+        rewrited_query = query
+
     index_contexts = []
     for index_name, docs in metadata_by_index.items():
         context_lines = [f"\nIndex: {index_name}"]
@@ -375,20 +412,33 @@ def summarize_full_metadata(query, metadata_by_index):
         index_contexts.append("\n".join(context_lines))
     full_context = "\n\n".join(index_contexts)
 
-    messages = [
-        {
+    messages = []
+    messages.append({
+        "role": "system",
+        "content": (
+            "You are a helpful assistant that summarizes document metadata. "
+            "The user may ask follow-up questions based on earlier queries."
+        )
+    })
+
+    # Optional prior user queries (as memory)
+    messages.append({
+            "role": "user",
+            "content": f"Previous queries: {previous_queries}"
+        })
+    
+    messages.append({
             "role": "user",
             "content": (
-                f"You are an assistant that summarizes document metadata.\n"
-                f"User asked: {query}\n\n"
+                f"User current query: {rewrited_query}\n\n"
                 f"Here is all available metadata grouped by index:\n\n{full_context}\n\n"
-                f"If user query {query} mentions about specific index name, Please summarize the data only on that index. Otherwise, summarize all indexes.\n"
+                f"Only answer the current query. Do not answer or repeat previous questions.\n"
+                f"If the query mentions a specific index, only summarize that index. Otherwise, summarize all indexes.\n"
                 f"list as many relevant documents as possible that match the user query.\n"
-                f"If you are not sure about the answer or cannot find answer from the metadata information, simply say 'Sorry, I cannot help with it. Please try looking it up on above share point links'.\n"
+                f"If you are not sure about the answer or nothing relevant is found, say 'Sorry, I cannot help with it. Please try looking it up on above share point links'.\n"
                 f"Use clear bullet points or sections."
             )
-        }
-    ]
+        })
 
     completion = client.chat.completions.create(
         model=AZURE_OPENAI_DEPLOYMENT,
@@ -404,7 +454,8 @@ def summarize_full_metadata(query, metadata_by_index):
         if url:
             reference_links += f"- {values.get('name', 'Unknown')} : {url}\n\n"
 
-    return  f"**Answer:**\n\n{reference_links}\n\n\n\n{summary}"         
+    return  f"**Answer:**\n\n{reference_links} \n\n\n\n {summary}"         
+
 
 def multi_index_search_documents(query, index_names, previous_queries, vector_weight=0.6, top_k=6, dynamic_filtering=True, custom_ranking=True, use_previous_context=True, debug=False):
     """
@@ -596,6 +647,10 @@ def multi_index_generate_response(query, context):
     
     # --- Build context string for LLM to generate main answer ---
     context_str = "\n\n".join(context_texts)
+
+    # Run LLM-based validation
+    is_valid, explanation = llm_context_guard_check(query, context_str, client)
+
     messages = [
         {
             "role": "user",
@@ -605,6 +660,7 @@ def multi_index_generate_response(query, context):
                 f"DOCUMENT CHUNKS:\n{context_str}\n\n"
                 f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
                 # f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
+                f"If the answer is not clearly stated in the provided context, or you are unsure, respond with: 'Sorry, I cannot help with that.' Then briely expalain reasoning."
                 f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
                 f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
                 f"- Use plain text with no HTML.\n"
@@ -620,7 +676,7 @@ def multi_index_generate_response(query, context):
 
     main_answer = completion.choices[0].message.content.strip()
     if warning_msg:
-        main_answer = f"Reminder: {warning_msg.strip()}" + "\n\n" + main_answer
+        main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
 
     # --- Build reference section ---
     reference_text = "\n\n**References:**\n"
@@ -637,6 +693,7 @@ def multi_index_generate_response(query, context):
         relevance_prompt = [
             {
                 "role": "user",
+                
                 "content": (
                     f"Be concise, Summarize in less than 150 words why this document is relevant to the question below, "
                     f"based only on the document's summary, key topics, and key terms. "
@@ -686,7 +743,7 @@ def multiindexquery(req: func.HttpRequest) -> func.HttpResponse:
             use_metadata_search_flag = should_use_metadata_search(query)    # use raw query for routing decision
             if use_metadata_search_flag:
                 metadata_by_index = metadata_table_by_index(index_names)
-                llm_summary = summarize_full_metadata(cleaned_query, metadata_by_index)        
+                llm_summary = summarize_full_metadata(cleaned_query, cleaned_query_history, metadata_by_index, use_previous_context=use_prev_context)        
                 return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
         # Step 1: Search all indexes
