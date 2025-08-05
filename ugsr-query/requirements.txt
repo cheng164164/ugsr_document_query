@@ -1,0 +1,6 @@
+azure-functions
+openai
+requests
+openpyxl
+azure-storage-blob>=12.14.0
+pandas[numpy]>=1.5.0,<2.2.0
