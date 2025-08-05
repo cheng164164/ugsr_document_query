@@ -30,8 +30,8 @@ index_names = ["business_index",
 
 # Metadata files in blob storage for each index
 metadata_files = {
-    "business_index": {'container_name': "north-america-business-documents-metadata", 'file_name': "meta_data_business_doc.xlsx"},
-    "ugsr_index": {'container_name': "undergroound-engineering-document-metadata", 'file_name': "meta_data_UGSR.xlsx"}
+    "business_index": {'container_name': "north-america-business-documents-metadata", 'file_name': "auto_extraction/business_metadata_new.csv"},
+    "ugsr_index": {'container_name': "undergroound-engineering-document-metadata", 'file_name': "auto_extraction/ugsr_metadata_new.csv"}
 }
 
 # SharePoint URLs for each index
@@ -402,7 +402,35 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
     )
     answer = response.choices[0].message.content.strip().lower()
     is_valid = answer.startswith("yes")
-    return is_valid, answer
+
+    # Second: determine if the question is completely irrelevant
+    is_completely_irrelevant = False
+    if not is_valid:
+        irrelevance_messages =[{
+                "role": "user",
+                "content": (
+                    f"Determine whether the following question is completely unrelated to the provided context.\n"
+                    f"Only perform this check if the question cannot be answered using the context.\n"
+                    f"If the question is at least somewhat related to the context, respond with RELEVANT.\n"
+                    f"If it is completely off-topic or unrelated, respond with IRRELEVANT.\n"
+                    f"QUESTION: {query}\n"
+                    f"CONTEXT:{context_text}\n"
+                    f"INSTRUCTIONS: \n"
+                    f" - If at least partial of keywords or terms match between the user query and provded context, then consider it as RELEVANT. \n" 
+                    f" - Reply with one word only: RELEVANT or IRRELEVANT."
+                )
+            }
+        ]        
+
+    irrelevance_response = client.chat.completions.create(
+        model=deployment,
+        messages=irrelevance_messages
+    )
+
+    relevance_tag = irrelevance_response.choices[0].message.content.strip().upper()
+    is_completely_irrelevant = relevance_tag == "IRRELEVANT"
+
+    return is_valid, answer, is_completely_irrelevant
 
 
 def metadata_table_by_index(index_names):
@@ -420,7 +448,13 @@ def metadata_table_by_index(index_names):
                 continue
             
             try:
-                df = pd.read_excel(io.BytesIO(data), engine="openpyxl")
+                if file_name.endswith(".csv"):
+                    df = pd.read_csv(io.BytesIO(data))
+                elif file_name.endswith(".xlsx") or file_name.endswith(".xls"):
+                    df = pd.read_excel(io.BytesIO(data), engine="openpyxl")
+                else:
+                    raise ValueError("Unsupported file type")
+
                 df = df.fillna("").astype(str)
                 metadata_by_index[index_name] = df.to_dict(orient="records")
             except Exception as e:
@@ -662,7 +696,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
         missing_keywords = [kw for kw in keywords if kw not in combined_text]
 
         if missing_keywords:
-            warning_msg = f"Keyword search indicates the following words are not found in any relevant documents: '{', '.join(missing_keywords)}'. You can ignore this message or consider rephrasing your question."
+            warning_msg = f"Keyword search indicates the following words are not found in any relevant documents: '{'; '.join(missing_keywords)}'. You can ignore this message or consider rephrasing your question."
         
     # Final results with warning if needed
     final_answer = warning_msg, final_results
@@ -707,13 +741,23 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
     context_str = "\n\n".join(context_texts)
 
     # Run LLM-based validation
-    is_valid, explanation = llm_context_guard_check(query, context_str, client)
+    is_valid, explanation, is_completely_irrelevant = llm_context_guard_check(query, context_str, client)
     explanation = ' '.join(explanation.strip().split()[1:])   # cleaning the explanation by deleting the first word - yes or no
     if not is_valid:
+        # Try to find semi-relevant documents (e.g., score > 0.3) to suggest contact
         main_answer = (
                         "Sorry, I cannot help with that. The provided documents do not clearly explain the requested information.\n"
                         f"(Reason: {explanation})"
         )
+
+        if not is_completely_irrelevant and top_chunks:
+            doc = top_chunks[0]
+            main_answer += (
+                "\n\n---\n Here is relevant document that might be helpful:\n\n"
+                "**Related Document**:"
+                f"  [{doc.get('filename', 'N/A')}]({doc.get('url', 'N/A')})\n\n"
+                f"**Key Contact**: {doc.get('owner', 'N/A')}"
+            )
         
         if warning_msg:
             main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
@@ -754,8 +798,8 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         if hide_ref_relevance:
             reference_text += (
                 f"\n---\n"
-                f"**Document Title**: {doc['document_name']}\n\n"
-                f"**URL**: {doc['url']}\n\n"
+                f"**Document**: [{doc['document_name']}]({doc['url']})\n\n"
+                f"**Key Contact**: {doc['key_contact']}\n\n"
             )
             continue
 
@@ -772,7 +816,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
                 "role": "user",
                 
                 "content": (
-                    f"Be concise, Summarize in less than 150 words why this document is relevant to the question below, "
+                    f"Be concise, Summarize in less than 100 words why this document is relevant to the question below, "
                     f"based only on the document's summary, key topics, and key terms. "
                     f"Use bullet points for clarity.\n"
                     f"Do not include HTML, markdown, or field labels.\n"
@@ -793,11 +837,10 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
 
         reference_text += (
                 f"\n---\n"
-                f"**Document Title**: {doc['document_name']}\n\n"
+                f"**Document**: [{doc['document_name']}]({doc['url']})\n\n"
                 f"**Key Contact**: {doc['key_contact']}\n\n"
                 # f" **Similarity Score**: {avg_score}\n\n"
                 f"**Relevance**: {relevance_summary}\n\n"
-                f"**URL**: {doc['url']}\n\n"
         )
 
     return f"**Answer:**\n\n{main_answer}{reference_text}"
