@@ -755,7 +755,6 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
             reference_text += (
                 f"\n---\n"
                 f"**Document Title**: {doc['document_name']}\n\n"
-                f"**Key Contact**: {doc['key_contact']}\n\n"
                 f"**URL**: {doc['url']}\n\n"
             )
             continue
@@ -810,8 +809,8 @@ def multiindexquery(req: func.HttpRequest) -> func.HttpResponse:
     try:
         req_body = req.get_json()
         query = req_body.get("query")
-        query_history = req_body.get("context", "")
-        answer_history = req_body.get("answer_history", "")
+        query_history = req_body.get("queryhistory", "")
+        answer_history = req_body.get("answerhistory", "")
         if not query:
             return func.HttpResponse("Error: Missing 'query' parameter", status_code=400)
 
