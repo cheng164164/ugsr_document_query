@@ -1,0 +1,8 @@
+is_global = true
+build_property.RootNamespace = extensions
+build_property.ProjectDir = /mnt/batch/tasks/shared/LS_root/mounts/clusters/tancheng-dev/code/Users/tan.cheng/test_queue_trigger/
+build_property.EnableComHosting = 
+build_property.EnableGeneratedComInterfaceComImportInterop = 
+build_property.CsWinRTUseWindowsUIXamlProjections = false
+build_property.EffectiveAnalysisLevelStyle = 
+build_property.EnableCodeStyleSeverity = 

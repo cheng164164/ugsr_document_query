@@ -35,3 +35,4 @@ pandas>=2.1.0
 
 # For Jupyter environment support
 ipykernel>=6.29.0
+azure-storage-queue>=12.8.0
