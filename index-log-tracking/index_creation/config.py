@@ -35,13 +35,13 @@ INDEX_CONFIGS = [
 SCHEMA_MAPPING_DICT = {
     # Mapping of standard schema -> metadata columns
     "ugsr_index_v2": {
-        "Name": "Document Name",
-        "Title": "Document Title",
-        "Doc Type": "Type",
-        "Document Owner(s)": "Key Contact",
-        "Doc Category": "Document Category",
+        "Name": "Name",
+        "Title": "Title",
+        "Doc Type": "Doc Type",
+        "Document Owner(s)": "Document Owner(s)",
+        "Doc Category": "Doc Category",
         "Function": None, # No direct mapping
-        "url": "URL"
+        "url": "url"
     },
     "business_index_v2": {
         "Name": "Name",

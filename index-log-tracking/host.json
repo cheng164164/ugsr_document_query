@@ -3,7 +3,7 @@
   "extensions": {
     "queues": {
       "maxDequeueCount": 2,  
-      "visibilityTimeout": "01:00:00"
+      "visibilityTimeout": "02:00:00"
     }
   },
   "logging": {

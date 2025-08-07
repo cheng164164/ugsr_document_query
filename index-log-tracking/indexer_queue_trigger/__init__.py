@@ -88,7 +88,7 @@ def run_index_job():
                 for batch_number in range(2):
                     logging.info(f"--- Running batch {batch_number + 1} of {total_batches} for index {config['index_name']} ---")
                     data_chunck_embed_upload_batch(
-                        splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
+                        splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df, config['metadata_container'], config['metadata_blob'],
                         config['index_name'], azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_deployment_endpoint, azure_oai_key,
                         azure_oai_deployment_model, using_embedder=True, batch_number=batch_number, batch_size=batch_size
                     )

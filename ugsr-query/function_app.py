@@ -539,14 +539,14 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
     summary = completion.choices[0].message.content.strip()
 
     # Append SharePoint links as references
-    reference_links = "\n\n\nYou can look up metadata information from the SharePoint.\n\n"+ "**SharePoint Links:**\n"
+    reference_links = "\n\n\nMore metadata information can be found from the SharePoint.\n\n"+ "**SharePoint Links:**\n"
 
     for index, values in share_point_urls.items():
         url = values.get("url", "")
         if url:
             reference_links += f"- {values.get('name', 'Unknown')} : {url}\n\n"
 
-    return  f"**Answer:**\n\n{reference_links} \n\n\n\n {summary}"         
+    return  f"**Answer:**\n\n{summary} \n\n\n\n {reference_links}"         
 
 
 def multi_index_search_documents(query, rewrited_query, index_names, vector_weight=0.6, top_k=6, 

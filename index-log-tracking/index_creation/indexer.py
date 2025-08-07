@@ -1,10 +1,11 @@
 import os
 import uuid
 import io
+import json
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions, BlobClient
 from openpyxl import load_workbook
 from datetime import datetime, timedelta
 from azure.core.credentials import AzureKeyCredential
@@ -234,9 +235,61 @@ def truncate_summary(text, max_chars=4000):
     end = truncated.rfind(". ")
     return truncated[:end+1] if end > 0 else truncated
 
-def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, 
+
+def obtain_version_and_publish_date(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model):
+    from openai import AzureOpenAI
+
+    client = AzureOpenAI(
+        azure_endpoint=azure_oai_endpoint,
+        api_key=azure_oai_key,
+        api_version="2025-01-01-preview",
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "From the following document content, extract the **version number** and **publish date** "
+                "(or effective date) if they exist. These are usually written together in a field like: \"Ver. 1.0, 05-25\".\n"
+                "Return only in the following JSON format:\n"
+                "{\"version\": <version>, \"publish_date\": <date>}\n"
+                "If a field is not found, set it to null. Here is the document content: " + context[:4000]
+            )
+        }
+    ]
+
+    try:
+        completion = client.chat.completions.create(
+            model=azure_oai_deployment_model,
+            messages=messages
+        )
+        result = completion.choices[0].message.content.strip()
+        parsed = json.loads(result)
+        return parsed.get("version"), parsed.get("publish_date")
+    except Exception as e:
+        return None, None
+
+
+def save_metadata_to_blob(metadata_df, connection_string, container_name, blob_name):
+    output_csv = metadata_df.to_csv(index=False)
+    blob_client = BlobClient.from_connection_string(
+        conn_str=connection_string,
+        container_name=container_name,
+        blob_name=blob_name
+    )
+    blob_client.upload_blob(output_csv, overwrite=True)
+
+
+def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
                          azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, 
                          azure_oai_deployment_model, using_embedder=True):
+    
+    # Ensure version and publish_date columns exist
+    if "version" not in metadata_df.columns:
+        metadata_df["version"] = None
+    if "publish date" not in metadata_df.columns:
+        metadata_df["publish date"] = None
+    
     indexed_docs = []
     blob_list = list_blobs(connection_string, container_name)
     for blob in blob_list:
@@ -246,9 +299,14 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
         topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
         terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
         summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model))
+        ver, date = obtain_version_and_publish_date(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
         meta_row = metadata_df[metadata_df["Name"].str.lower() == os.path.basename(file_name).lower()]
         if meta_row.empty:
             continue
+        idx = meta_row.index[0]
+        metadata_df.at[idx, "version"] = ver
+        metadata_df.at[idx, "publish date"] = date
+
         meta = meta_row.iloc[0].to_dict()
         chunks = splitter.create_documents([doc_content])
         if using_embedder:
@@ -271,6 +329,9 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
                 "content": chunk.page_content,
                 "content_embedding": vec,
             })
+
+    # Save updated metadata_df to blob using separate function
+    save_metadata_to_blob(metadata_df, connection_string, container_name, metadata_blob_name)
     return indexed_docs
 
 
@@ -281,7 +342,7 @@ def upload_search_index(index_name, search_key, search_endpoint, indexed_docs):
         search_client.upload_documents(documents=indexed_docs[i:i+1000])
 
 
-def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connection_string, container_name, metadata_df,
+def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
                   index_name, azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, 
                   azure_oai_key, azure_oai_deployment_model, using_embedder=True, batch_number=0, batch_size=30):
     '''
@@ -290,6 +351,12 @@ def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connecti
     from azure.storage.blob import ContainerClient
     from azure.core.credentials import AzureKeyCredential
     from azure.search.documents import SearchClient
+
+    # Ensure version and publish_date columns exist
+    if "version" not in metadata_df.columns:
+        metadata_df["version"] = None
+    if "publish date" not in metadata_df.columns:
+        metadata_df["publish date"] = None
 
     # --- Load blob list
     container_client = ContainerClient.from_connection_string(connection_string, container_name)
@@ -316,15 +383,19 @@ def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connecti
             topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
             terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
             summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model))
+            ver, date = obtain_version_and_publish_date(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
 
             # print(f"doc_content: {doc_content}\n** topics: {topics}\n** terms: {terms}\n** summary: {summary}")
-
             meta_row = metadata_df[metadata_df["Name"].str.lower() == os.path.basename(blob.name).lower()]
             if meta_row.empty:
                 print(f"⚠️  Skipped (no metadata): {blob.name}")
                 continue
-            meta = meta_row.iloc[0].to_dict()
 
+            idx = meta_row.index[0]
+            metadata_df.at[idx, "version"] = ver
+            metadata_df.at[idx, "publish date"] = date
+
+            meta = meta_row.iloc[0].to_dict()
             chunks = splitter.create_documents([doc_content])
 
             if using_embedder:
@@ -355,6 +426,9 @@ def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connecti
         except Exception as e:
             print(f" ❌ Failed: {blob.name} — {str(e)}")
             continue
+
+    # Save updated metadata_df to blob using separate function
+    save_metadata_to_blob(metadata_df, connection_string, metadata_container, metadata_blob_name)
 
     # --- Upload to Azure Search
     print('Now uploading the indexed_docs to the index created in AI search service...')
