@@ -1,9 +1,10 @@
 {
   "version": "2.0",
+  "functionTimeout": "10:00:00",
   "extensions": {
     "queues": {
       "maxDequeueCount": 2,  
-      "visibilityTimeout": "02:00:00"
+      "visibilityTimeout": "05:00:00"
     }
   },
   "logging": {

@@ -29,6 +29,18 @@ INDEX_CONFIGS = [
         "metadata_container": "north-america-business-documents-metadata",
         "metadata_blob": "auto_extraction/business_metadata_new.csv",
         "document_container": "north-america-business-documents"
+    },
+    {
+        "index_name": "all_regions_index",
+        "metadata_container": "all-regions-documents-metadata",
+        "metadata_blob": "auto_extraction/all_regions_metadata_new.csv",
+        "document_container": "all-regions-documents"
+    },
+    {
+        "index_name": "ehs_index",
+        "metadata_container": "global-ehs-documents-metadata",
+        "metadata_blob": "auto_extraction/ehs_metadata_new.csv",
+        "document_container": "global-ehs-documents"
     }
 ]
 
@@ -51,5 +63,23 @@ SCHEMA_MAPPING_DICT = {
         "Doc Category": "Doc Category",
         "Function": "Function",
         "url": "url"
-    }
+    },
+    "all_regions_index": {
+        "Name": "Name",
+        "Title": "Title",
+        "Doc Type": "Doc Type",
+        "Document Owner(s)": "Document Owner(s)",
+        "Doc Category": "Doc Category",
+        "Function": "Function",
+        "url": "url"
+    },
+    "ehs_index": {
+        "Name": "Name",
+        "Title": None,
+        "Doc Type": None,
+        "Document Owner(s)": "Document Owner(s)",
+        "Doc Category": None,
+        "Function": None,
+        "url": "url"
+    },    
 }

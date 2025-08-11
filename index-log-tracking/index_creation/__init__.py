@@ -26,9 +26,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         queue_name = "indexing-requests"
         queue_client = QueueClient.from_connection_string(conn_str, queue_name)
 
-        message = json.dumps({"action": "start_indexing"})
-        encoded = base64.b64encode(message.encode("utf-8")).decode("utf-8")
-        queue_client.send_message(encoded)
+        for config in INDEX_CONFIGS:
+            message = json.dumps({
+                "action": "start_indexing",
+                "index_name": config["index_name"]
+            })
+            encoded = base64.b64encode(message.encode("utf-8")).decode("utf-8")
+            queue_client.send_message(encoded)
 
         logging.info("✅ Base64-encoded message sent to queue.")
         return func.HttpResponse("Message enqueued.", status_code=202)
@@ -36,5 +40,3 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.exception("❌ Failed to enqueue message.")
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-    
-

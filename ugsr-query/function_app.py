@@ -25,19 +25,25 @@ AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "text-embedding-3-small"
 
 # Define mutli indexes names to search
 index_names = ["business_index",
-               "ugsr_index"
+               "ugsr_index",
+               "ehs_index",
+               "all_regions_index"
               ]
 
 # Metadata files in blob storage for each index
 metadata_files = {
     "business_index": {'container_name': "north-america-business-documents-metadata", 'file_name': "auto_extraction/business_metadata_new.csv"},
-    "ugsr_index": {'container_name': "undergroound-engineering-document-metadata", 'file_name': "auto_extraction/ugsr_metadata_new.csv"}
+    "ugsr_index": {'container_name': "undergroound-engineering-document-metadata", 'file_name': "auto_extraction/ugsr_metadata_new.csv"},
+    "ehs_index": {'container_name': "global-ehs-documents-metadata", 'file_name': "auto_extraction/ehs_metadata_new.csv"},
+    "all_regions_index": {'container_name': "all-regions-documents-metadata", 'file_name': "auto_extraction/all_regions_metadata_new.csv"}
 }
 
 # SharePoint URLs for each index
 share_point_urls = {
     "business_index": {'name': 'Business Documents North America', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00243/SitePages/PublishedDocuments.aspx"},
-    "ugsr_index": {'name': 'UGSR Engineering Documents', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00221/engres_joy/PPED/JGUEngDocs?viewpath=%2Fsites%2FNAGMUSGR00221%2Fengres%5Fjoy%2FPPED%2FJGUEngDocs"}
+    "ugsr_index": {'name': 'UGSR Engineering Documents', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00221/engres_joy/PPED/JGUEngDocs?viewpath=%2Fsites%2FNAGMUSGR00221%2Fengres%5Fjoy%2FPPED%2FJGUEngDocs"},
+    "ehs_index": {'name': 'Global EHS Documents', "url": "https://globalkomatsu.sharepoint.com/sites/Velocity-GlobalPoliciesandProcedures/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FVelocity%2DGlobalPoliciesandProcedures%2FShared%20Documents%2FGeneral%2FGlobal%20EHS%20Policies&viewid=3d027989%2Ddf2e%2D434d%2Da643%2D3e28353d8fbb&csf=1&web=1&e=pcFPZF&CID=940883b9%2D627f%2D4a42%2D8bad%2D5120ca6b6223&FolderCTID=0x0120003F332C7233C5DB4A94D41DD5FBC21C23"},
+    "all_regions_index": {'name': 'Business Docuemnts All Regions', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"}
 }
 
 # Feature On/Off flags
@@ -155,13 +161,21 @@ def rewrite_query_with_history(current_query, relevant_history_text):
     )
 
     system_prompt = (
-        "You are a smart query cleaner and rewriter. A user is asking a question that may refer to earlier exchanges.\n"
-        "You are given the current question and a relevant excerpt from prior user and assistant turns.\n"
-        "Your job is to:\n"
-        "- Clarify the current question by resolving any vague terms (e.g., 'it', 'this', 'that', 'these', 'those', 'they', 'the one') using the history.\n"
-        "- Keep only what is necessary to make the current query clear.\n"
-        "- Do not list the history or answer the question.\n"
-        "Return only the rewritten version of the current question."
+        "You are a smart query rewriter that creates a clear and self-contained version of a user's intent.\n"
+        "The user may respond with clarifying statements, follow-up questions, or additional details.\n"
+        "You are given:\n"
+        "- The current user input (which may be a question or clarification)\n"
+        "- Relevant prior conversation turns (user and assistant)\n"
+        "The assistant may have previously asked the user to clarify their question,\n"
+        "so the latest user message may be a direct clarification of an earlier vague or incomplete query.\n"
+        "If you found the latest user message is a new query/topic which is not about clarification or irrelevant to prior conversation turns, then ignore the coversation history."
+        "Your task is to synthesize all of this context into a single rewritten query that:\n"
+        "- Clearly expresses the user's intended question\n"
+        "- Resolves any vague references (e.g., 'this', 'it', 'that', 'these', 'those', 'they', 'the one')\n"
+        "- Incorporates relevant details and clarifications from the current and previous turns\n"
+        "- Is suitable for retrieval or search\n"
+        "Do NOT answer the question or include chat history in the output.\n"
+        "Only return the rewritten query."
     )
 
     user_prompt = (
@@ -386,6 +400,9 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
             "Be strict. If the context uses different terms, systems, or services than the question, reply 'no'.\n"
             "Do not infer answers. Only consider exact term matches.\n"
             "Your reply must start with 'yes' or 'no'. Then give a brief reason why."
+            "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about,"
+            "especially if it's somewhat related to the question. This helps guide the user toward a more appropriate query."
+            "In the end ask user 'Would you like to clarify your question?'."
         )
     }
     user_msg = {
@@ -422,13 +439,13 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
             }
         ]        
 
-    irrelevance_response = client.chat.completions.create(
-        model=deployment,
-        messages=irrelevance_messages
-    )
+        irrelevance_response = client.chat.completions.create(
+            model=deployment,
+            messages=irrelevance_messages
+        )
 
-    relevance_tag = irrelevance_response.choices[0].message.content.strip().upper()
-    is_completely_irrelevant = relevance_tag == "IRRELEVANT"
+        relevance_tag = irrelevance_response.choices[0].message.content.strip().upper()
+        is_completely_irrelevant = relevance_tag == "IRRELEVANT"
 
     return is_valid, answer, is_completely_irrelevant
 
@@ -528,7 +545,7 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
         f"-Only answer the current query. Do not answer or repeat previous questions.\n"
         f"-If the query mentions a specific index, only summarize that index. Otherwise, summarize all indexes.\n"
         f"-list as many relevant documents as possible that match the user query.\n"
-        f"-If you are not sure about the answer or nothing relevant is found, say 'Sorry, I cannot help with it. Please try looking it up on above share point links'.\n"
+        f"-If you are not sure about the answer or nothing relevant is found, say 'Sorry, I cannot help with it. Please try looking it up on the share point links'.\n"
         f"-Use clear bullet points or sections."
     )
     
@@ -542,9 +559,10 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
     reference_links = "\n\n\nMore metadata information can be found from the SharePoint.\n\n"+ "**SharePoint Links:**\n"
 
     for index, values in share_point_urls.items():
+        name = values.get("name", "Unknown")
         url = values.get("url", "")
         if url:
-            reference_links += f"- {values.get('name', 'Unknown')} : {url}\n\n"
+            reference_links += f"- [{name}]({url})\n\n"
 
     return  f"**Answer:**\n\n{summary} \n\n\n\n {reference_links}"         
 
@@ -753,8 +771,8 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         if not is_completely_irrelevant and top_chunks:
             doc = top_chunks[0]
             main_answer += (
-                "\n\n---\n Here is relevant document that might be helpful:\n\n"
-                "**Related Document**:"
+                "\n\n---\n Please refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
+                "**Document**:"
                 f"  [{doc.get('filename', 'N/A')}]({doc.get('url', 'N/A')})\n\n"
                 f"**Key Contact**: {doc.get('owner', 'N/A')}"
             )
@@ -776,7 +794,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
                     f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
                     f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
                     f"- Use plain text with no HTML.\n"
-                    f"- Separate sections with line breaks."
+                    f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
                 )
             }
         ]

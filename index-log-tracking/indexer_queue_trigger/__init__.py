@@ -25,11 +25,22 @@ def main(msg: func.QueueMessage) -> None:
             logging.warning("⚠️ Invalid action")
             return
 
-        run_index_job()
+        index_name = payload.get("index_name")
+        if not index_name:
+            logging.warning("⚠️ No index_name provided in payload")
+            return
+
+        config = next((c for c in INDEX_CONFIGS if c["index_name"] == index_name), None)
+        if not config:
+            logging.warning(f"⚠️ No config found for index: {index_name}")
+            return
+        
+        logging.info(f"✅ Started indexing for: {index_name}")
+        run_index_job(config)  # <- You need to define this function
+        logging.info(f"✅ Finished indexing for: {index_name}")
 
     except Exception as e:
         logging.exception(f"❌ Failed to process message: {e}")
-        # Log failed message to blob
         log_failed_message_to_blob(
             msg_body=raw,
             reason=str(e),
@@ -39,7 +50,8 @@ def main(msg: func.QueueMessage) -> None:
         )
 
 
-def run_index_job():
+
+def run_index_job(config):
     try:
         set_env_vars(ENV_VARS=ENV_VARS)
 
@@ -69,40 +81,33 @@ def run_index_job():
             api_version=azure_openai_api_version
         )
 
-        for config in INDEX_CONFIGS:
-            try:
-                logging.info(f"=== Creating index: {config['index_name']} ===")
-                metadata_df = read_metadata_from_blob(connection_string, config['metadata_container'], config['metadata_blob'])
-                metadata_df = clean_metadata(metadata_df, SCHEMA_MAPPING_DICT, config['index_name'])
-                logging.info(f"Metadata loaded with {len(metadata_df)} rows.")
+        logging.info(f"=== Creating index: {config['index_name']} ===")
+        metadata_df = read_metadata_from_blob(connection_string, config['metadata_container'], config['metadata_blob'])
+        metadata_df = clean_metadata(metadata_df, SCHEMA_MAPPING_DICT, config['index_name'])
+        logging.info(f"Metadata loaded with {len(metadata_df)} rows.")
 
-                create_index(config['index_name'], search_key, search_endpoint)
+        create_index(config['index_name'], search_key, search_endpoint)
 
-                container_client = ContainerClient.from_connection_string(connection_string, config['document_container'])
-                blob_list = [b for b in container_client.list_blobs() if b.name != "index_log.csv"]
-                total_files = len(blob_list)
-                batch_size = 10
-                total_batches = (total_files + batch_size - 1) // batch_size
-                logging.info(f"Found {total_files} blobs in container '{config['document_container']}'")
+        container_client = ContainerClient.from_connection_string(connection_string, config['document_container'])
+        blob_list = [b for b in container_client.list_blobs() if b.name != "index_log.csv"]
+        total_files = len(blob_list)
+        batch_size = 50
+        total_batches = (total_files + batch_size - 1) // batch_size
+        logging.info(f"Found {total_files} blobs in container '{config['document_container']}'")
 
-                for batch_number in range(2):
-                    logging.info(f"--- Running batch {batch_number + 1} of {total_batches} for index {config['index_name']} ---")
-                    data_chunck_embed_upload_batch(
-                        splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df, config['metadata_container'], config['metadata_blob'],
-                        config['index_name'], azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_deployment_endpoint, azure_oai_key,
-                        azure_oai_deployment_model, using_embedder=True, batch_number=batch_number, batch_size=batch_size
-                    )
+        for batch_number in range(total_batches):
+            logging.info(f"--- Running batch {batch_number + 1} of {total_batches} for index {config['index_name']} ---")
+            metadata_df = data_chunck_embed_upload_batch(
+                                    splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df, config['metadata_container'], config['metadata_blob'],
+                                    config['index_name'], azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_deployment_endpoint, azure_oai_key,
+                                    azure_oai_deployment_model, using_embedder=True, batch_number=batch_number, batch_size=batch_size
+            )
 
-                logging.info(f"✅ Finished: {config['index_name']}")
-
-            except Exception as index_error:
-                logging.exception(f"❌ Failed processing index {config['index_name']}: {str(index_error)}")
-
-        logging.info("🎉 All index creation jobs completed.")
+        logging.info(f"✅ Finished: {config['index_name']}")
 
     except Exception as e:
-        logging.exception(f"❌ Error in run_index_job: {str(e)}")
-
+        logging.exception(f"❌ Failed processing index {config['index_name']}: {str(e)}")
+        raise
 
 
 def log_failed_message_to_blob(msg_body: str, reason: str, storage_conn_str: str, container: str, blob_prefix: str):

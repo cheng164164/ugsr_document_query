@@ -250,7 +250,8 @@ def obtain_version_and_publish_date(context, azure_oai_endpoint, azure_oai_key, 
             "role": "user",
             "content": (
                 "From the following document content, extract the **version number** and **publish date** "
-                "(or effective date) if they exist. These are usually written together in a field like: \"Ver. 1.0, 05-25\".\n"
+                "(or effective date) if they exist. These are usually written together in a field like: \"Ver. 1.0, 05-25\"."
+                "or the date maybe in format like 12/4/2024, the version maybe in format like 3.0. Please find the latest date and version.\n"
                 "Return only in the following JSON format:\n"
                 "{\"version\": <version>, \"publish_date\": <date>}\n"
                 "If a field is not found, set it to null. Here is the document content: " + context[:4000]
@@ -444,4 +445,4 @@ def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connecti
 
     print(f" 🎉 Finished uploading batch {batch_number + 1} ({len(indexed_docs)} chunks)")
 
-
+    return metadata_df
