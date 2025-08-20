@@ -1,5 +1,6 @@
 import os
 import uuid
+import base64
 import io
 import json
 import pandas as pd
@@ -36,6 +37,7 @@ def read_metadata_from_blob(connection_string, container_name, blob_name):
 
     if file_extension == '.csv':
         df = pd.read_csv(stream)
+        df = df.astype(str)
         return df
 
     elif file_extension in ['.xlsx', '.xls']:
@@ -59,6 +61,7 @@ def read_metadata_from_blob(connection_string, container_name, blob_name):
             rows.append(row_values)
 
         df = pd.DataFrame(rows, columns=header)
+        df = df.astype(str)
         return df
     else:
         raise ValueError("Unsupported file format. Only .xlsx and .csv are supported.")
@@ -281,6 +284,20 @@ def save_metadata_to_blob(metadata_df, connection_string, container_name, blob_n
     blob_client.upload_blob(output_csv, overwrite=True)
 
 
+def is_english_filename(name):
+    try:
+        # Allow most common characters in English filenames
+        return bool(re.match(r"^[A-Za-z0-9\s\-\u2013\u2014\.,_()\[\]{}'\":;@&!#\$%\^+=]+$", name))
+    except:
+        return False
+
+
+def make_doc_id(file_key: str, chunk_id: int) -> str:
+    """Return a stable document ID for Azure AI Search."""
+    encoded = base64.urlsafe_b64encode(file_key.encode("utf-8")).decode("utf-8").rstrip("=")
+    return f"{encoded}-chunk-{chunk_id}"
+
+
 def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
                          azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, 
                          azure_oai_deployment_model, using_embedder=True):
@@ -294,6 +311,11 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
     indexed_docs = []
     blob_list = list_blobs(connection_string, container_name)
     for blob in blob_list:
+        # Skip non-English file names
+        if not is_english_filename(blob.name):
+            print(f"⏭️ Skipped non-English file: {blob.name}")
+            continue
+        
         file_name = blob.name
         sas_url = generate_blob_sas_url(connection_string, container_name, file_name)
         doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key)
@@ -312,11 +334,14 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
         chunks = splitter.create_documents([doc_content])
         if using_embedder:
             vectors = embedder.embed_documents([chunk.page_content for chunk in chunks])
+            # vector_summary = embedder.embed_documents([summary])[0]
         else:
             vectors = embedder_client.embeddings.create(model="text-embedding-3-small", input=[chunk.page_content for chunk in chunks])
-        for vec, chunk in zip(vectors, chunks):
+            # vector_summary = embedder_client.embeddings.create(model="text-embedding-3-small", input=[summary])
+
+        for chunk_id, (vec, chunk) in enumerate(zip(vectors, chunks)):
             indexed_docs.append({
-                "id": str(uuid.uuid4()),
+                "id": make_doc_id(file_name.lower(), chunk_id),
                 "filename": file_name.lower(),
                 "title": meta.get("Title", "").strip().lower(),
                 "url": meta["url"],
@@ -343,9 +368,9 @@ def upload_search_index(index_name, search_key, search_endpoint, indexed_docs):
         search_client.upload_documents(documents=indexed_docs[i:i+1000])
 
 
-def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
+def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
                   index_name, azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, 
-                  azure_oai_key, azure_oai_deployment_model, using_embedder=True, batch_number=0, batch_size=30):
+                  azure_oai_key, azure_oai_deployment_model, using_embedder=True, batch_number=0, batch_size=30, total_batches=None, blob_subset=None):
     '''
     Manually control batch run process by assigning batch_number.
     '''
@@ -361,24 +386,39 @@ def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connecti
 
     # --- Load blob list
     container_client = ContainerClient.from_connection_string(connection_string, container_name)
-    blob_list = [b for b in container_client.list_blobs() if b.name != "index_log.csv"]
-    total_files = len(blob_list)
-
-    # --- Calculate batch slice
-    start = batch_number * batch_size
-    end = min(start + batch_size, total_files)
-    current_batch = blob_list[start:end]
+    all_blobs = list(container_client.list_blobs())
+    if blob_subset is not None:
+        # Use passed subset directly
+        blob_subset_set = set(blob_subset)  # For faster lookup
+        current_batch = [b for b in all_blobs if b.name in blob_subset_set]
+        total_files = len(current_batch)
+        start = 0
+        end = total_files
+    else:
+        # Use calculated slicing based on batch_number and batch_size
+        blob_list = [b for b in all_blobs if b.name != "index_log.csv"]
+        total_files = len(blob_list)
+        start = batch_number * batch_size
+        end = min(start + batch_size, total_files)
+        current_batch = blob_list[start:end]
 
     if not current_batch:
         print(f"❌ No files found in batch {batch_number}")
         return
 
-    print(f"\n 📦Processing batch {batch_number + 1}: files {start + 1} to {end} of {total_files}")
+    print(f"\n📦 [Index: {index_name}] Starting batch {batch_number + 1}: processing files {start + 1} to {end} of {total_files}")
     indexed_docs = []
 
     for i, blob in enumerate(current_batch):
-        print(f' 📄Processing {blob.name}... Progress {i + 1}/{len(current_batch)}')
+        print(f"📄 [Index: {index_name} ({total_files} files)] [Batch {batch_number + 1}/{total_batches}] [{start + i + 1}/{total_files}] Processing: {blob.name}")
+
+        # Skip non-English file names
+        if not is_english_filename(blob.name):
+            print(f"⏭️ Skipped non-English file: {blob.name}")
+            continue
+        
         try:
+            file_name = blob.name
             sas_url = generate_blob_sas_url(connection_string, container_name, blob.name)
             doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key)
             topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
@@ -401,15 +441,15 @@ def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connecti
 
             if using_embedder:
                 vectors = embedder.embed_documents([chunk.page_content for chunk in chunks])
-                vector_summary = embedder.embed_documents([summary])[0]
+                # vector_summary = embedder.embed_documents([summary])[0]
             else:
                 vectors = embedder_client.embeddings.create(model="text-embedding-3-small", input=[chunk.page_content for chunk in chunks])
-                vector_summary = embedder_client.embeddings.create(model="text-embedding-3-small", input=[summary])
+                # vector_summary = embedder_client.embeddings.create(model="text-embedding-3-small", input=[summary])
 
-            for vec, chunk in zip(vectors, chunks):
+            for chunk_id, (vec, chunk) in enumerate(zip(vectors, chunks)):
                 indexed_docs.append({
-                    "id": str(uuid.uuid4()),
-                    "filename": blob.name.lower(),
+                    "id": make_doc_id(file_name.lower(), chunk_id),
+                    "filename": file_name.lower(),
                     "title": meta.get("Title", "").strip().lower(),
                     "url": meta["url"],
                     "owner": meta.get("Document Owner(s)", "").strip().lower(),
@@ -440,9 +480,10 @@ def data_chunck_embed_upload_batch(splitter, embedder, embedder_client, connecti
         result = search_client.upload_documents(documents=indexed_docs[i:i+1000])
         for r in result:
             if not r.succeeded:
-                print(f"❌ Upload failed: {r.key} — {r.error_message}")
-        print(f" ✅ Uploaded batch segment {i//1000 + 1}")
+                print(f"❌ [Index: {index_name}] [Batch {batch_number + 1}/{total_batches or '?'}] Upload failed: {r.key} — {r.error_message}")
+        print(f" ✅ [Index: {index_name}] [Batch {batch_number + 1}/{total_batches or '?'}] Uploaded batch segment {i//1000 + 1}"
+              f"({min(i+1000, len(indexed_docs))}/{len(indexed_docs)} chunks)")
 
-    print(f" 🎉 Finished uploading batch {batch_number + 1} ({len(indexed_docs)} chunks)")
+    print(f" 🎉 Finished uploading [Index: {index_name}] batch {batch_number + 1} ({len(indexed_docs)} chunks)")
 
     return metadata_df

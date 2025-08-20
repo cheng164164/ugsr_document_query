@@ -40,6 +40,19 @@ def clean_metadata(df, schema_mapping_dict, index_name):
     for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].apply(remove_hash_number)
     df = df.fillna("")
+
+    # Merge duplicate file names by concatenating differing values with ';'
+    if 'Name' in df.columns:
+        group_cols = [col for col in df.columns if col != 'Name']
+
+        def merge_rows(group):
+            merged = {}
+            merged['Name'] = group.name
+            for col in group_cols:
+                merged[col] = '; '.join(sorted(set(val for val in group[col] if val)))
+            return pd.Series(merged)
+
+        df = df.groupby('Name').apply(merge_rows).reset_index(drop=True)
     return df
 
 
