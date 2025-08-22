@@ -397,9 +397,7 @@ def upload_search_index(index_name, search_key, search_endpoint, indexed_docs):
 def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
                   index_name, azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, 
                   azure_oai_key, azure_oai_deployment_model, using_embedder=True, batch_number=0, batch_size=30, total_batches=None, blob_subset=None):
-    '''
-    Manually control batch run process by assigning batch_number.
-    '''
+    
     from azure.storage.blob import ContainerClient
     from azure.core.credentials import AzureKeyCredential
     from azure.search.documents import SearchClient

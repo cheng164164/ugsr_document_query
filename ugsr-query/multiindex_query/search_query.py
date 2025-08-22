@@ -11,8 +11,11 @@ import json
 import io
 import openpyxl
 import pandas as pd
+from .config import ENV_VARS, index_names, metadata_files, share_point_urls, feature_flags
+from .util import set_env_vars 
 
 
+set_env_vars(ENV_VARS)
 # Load environment variables
 AZURE_BLOB_CONN_STRING = os.getenv("AZURE_BLOB_CONN_STRING")
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
@@ -21,42 +24,6 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "text-embedding-3-small"
-
-
-# Define mutli indexes names to search
-index_names = ["business_index",
-               "ugsr_index",
-               "ehs_index",
-               "all_regions_index"
-              ]
-
-# Metadata files in blob storage for each index
-metadata_files = {
-    "business_index": {'container_name': "north-america-business-documents-metadata", 'file_name': "auto_extraction/business_metadata_new.csv"},
-    "ugsr_index": {'container_name': "undergroound-engineering-document-metadata", 'file_name': "auto_extraction/ugsr_metadata_new.csv"},
-    "ehs_index": {'container_name': "global-ehs-document-metadata", 'file_name': "auto_extraction/ehs_metadata_new.csv"},
-    "all_regions_index": {'container_name': "all-regions-document-metadata", 'file_name': "auto_extraction/all_regions_metadata_new.csv"}
-}
-
-# SharePoint URLs for each index
-share_point_urls = {
-    "business_index": {'name': 'Business Documents North America', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00243/SitePages/PublishedDocuments.aspx"},
-    "ugsr_index": {'name': 'UGSR Engineering Documents', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00221/engres_joy/PPED/JGUEngDocs?viewpath=%2Fsites%2FNAGMUSGR00221%2Fengres%5Fjoy%2FPPED%2FJGUEngDocs"},
-    "ehs_index": {'name': 'Global EHS Documents', "url": "https://globalkomatsu.sharepoint.com/sites/Velocity-GlobalPoliciesandProcedures/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FVelocity%2DGlobalPoliciesandProcedures%2FShared%20Documents%2FGeneral%2FGlobal%20EHS%20Policies&viewid=3d027989%2Ddf2e%2D434d%2Da643%2D3e28353d8fbb&csf=1&web=1&e=pcFPZF&CID=940883b9%2D627f%2D4a42%2D8bad%2D5120ca6b6223&FolderCTID=0x0120003F332C7233C5DB4A94D41DD5FBC21C23"},
-    "all_regions_index": {'name': 'Business Docuemnts All Regions', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"}
-}
-
-# Feature On/Off flags
-debug_mode = True   # Set to True to enable debug prints
-custom_ranking = True   # Set to True to enable custom ranking (vector + keyword); False to use Azure default ranking
-dynamic_filtering = False   # Set to True to enable dynamic metadata filtering based on query keywords
-keywords_matching = False   # Set to True to enable keyword matching check and warning    
-metadata_search = True    # Set to True to enable metadata-only search for relevant queries
-use_prev_context = True   # Set to True to enable the feature that uses previous queries as context
-hide_ref_relevance = True # Set to True to hide relevance explanation in the reference section
-
-app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
 
 def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "contents"}):
     """
@@ -161,13 +128,21 @@ def rewrite_query_with_history(current_query, relevant_history_text):
     )
 
     system_prompt = (
-        "You are a smart query cleaner and rewriter. A user is asking a question that may refer to earlier exchanges.\n"
-        "You are given the current question and a relevant excerpt from prior user and assistant turns.\n"
-        "Your job is to:\n"
-        "- Clarify the current question by resolving any vague terms (e.g., 'it', 'this', 'that', 'these', 'those', 'they', 'the one') using the history.\n"
-        "- Keep only what is necessary to make the current query clear.\n"
-        "- Do not list the history or answer the question.\n"
-        "Return only the rewritten version of the current question."
+        "You are a smart query rewriter that creates a clear and self-contained version of a user's intent.\n"
+        "The user may respond with clarifying statements, follow-up questions, or additional details.\n"
+        "You are given:\n"
+        "- The current user input (which may be a question or clarification)\n"
+        "- Relevant prior conversation turns (user and assistant)\n"
+        "The assistant may have previously asked the user to clarify their question,\n"
+        "so the latest user message may be a direct clarification of an earlier vague or incomplete query.\n"
+        "If you found the latest user message is a new query/topic which is not about clarification or irrelevant to prior conversation turns, then ignore the coversation history."
+        "Your task is to synthesize all of this context into a single rewritten query that:\n"
+        "- Clearly expresses the user's intended question\n"
+        "- Resolves any vague references (e.g., 'this', 'it', 'that', 'these', 'those', 'they', 'the one')\n"
+        "- Incorporates relevant details and clarifications from the current and previous turns\n"
+        "- Is suitable for retrieval or search\n"
+        "Do NOT answer the question or include chat history in the output.\n"
+        "Only return the rewritten query."
     )
 
     user_prompt = (
@@ -392,6 +367,9 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
             "Be strict. If the context uses different terms, systems, or services than the question, reply 'no'.\n"
             "Do not infer answers. Only consider exact term matches.\n"
             "Your reply must start with 'yes' or 'no'. Then give a brief reason why."
+            "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about,"
+            "especially if it's somewhat related to the question. This helps guide the user toward a more appropriate query."
+            "In the end ask user 'Would you like to clarify your question?'."
         )
     }
     user_msg = {
@@ -428,13 +406,13 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
             }
         ]        
 
-    irrelevance_response = client.chat.completions.create(
-        model=deployment,
-        messages=irrelevance_messages
-    )
+        irrelevance_response = client.chat.completions.create(
+            model=deployment,
+            messages=irrelevance_messages
+        )
 
-    relevance_tag = irrelevance_response.choices[0].message.content.strip().upper()
-    is_completely_irrelevant = relevance_tag == "IRRELEVANT"
+        relevance_tag = irrelevance_response.choices[0].message.content.strip().upper()
+        is_completely_irrelevant = relevance_tag == "IRRELEVANT"
 
     return is_valid, answer, is_completely_irrelevant
 
@@ -589,7 +567,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
     vector_field = "content_embedding"
     
     optimized_query = llm_search_query_optimizer(query, rewrited_query, use_previous_context)
-    keywords = extract_keywords(query, optimized_query, debug=debug_mode) if keywords_matching else None
+    keywords = extract_keywords(query, optimized_query, debug=feature_flags["debug_mode"]) if keywords_matching else None
     query_em = get_query_embedding(optimized_query)
 
     all_results = []
@@ -760,7 +738,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         if not is_completely_irrelevant and top_chunks:
             doc = top_chunks[0]
             main_answer += (
-                "\n\n---\n Refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
+                "\n\n---\n Please refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
                 "**Document**:"
                 f"  [{doc.get('filename', 'N/A')}]({doc.get('url', 'N/A')})\n\n"
                 f"**Key Contact**: {doc.get('owner', 'N/A')}"
@@ -783,7 +761,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
                     f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
                     f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
                     f"- Use plain text with no HTML.\n"
-                    f"- Separate sections with line breaks."
+                    f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
                 )
             }
         ]
@@ -851,49 +829,3 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         )
 
     return f"**Answer:**\n\n{main_answer}{reference_text}"
-
-
-@app.route(route="multiindexquery")
-def multiindexquery(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Python HTTP trigger function processed a request.')
-    try:
-        req_body = req.get_json()
-        query = req_body.get("query")
-        query_history = req_body.get("queryhistory", "")
-        answer_history = req_body.get("answerhistory", "")
-        if not query:
-            return func.HttpResponse("Error: Missing 'query' parameter", status_code=400)
-
-        cleaned_query = clean_query_for_llm(query)  # Clean query by removing routing keywords if there are any
-        cleaned_query_history = clean_query_for_llm(query_history)
-
-        history_context = filter_relevant_history(cleaned_query, cleaned_query_history, answer_history)
-        if use_prev_context:
-            rewrited_query = rewrite_query_with_history(cleaned_query, history_context)
-        else:
-            rewrited_query = cleaned_query
-
-        if metadata_search:
-            use_metadata_search_flag = should_use_metadata_search(query)    # use raw query for routing decision
-            if use_metadata_search_flag:
-                metadata_by_index = metadata_table_by_index(index_names)
-                llm_summary = summarize_full_metadata(rewrited_query, history_context, metadata_by_index)        
-                return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
-
-        # Step 1: Search all indexes
-        docs = multi_index_search_documents(cleaned_query, rewrited_query, index_names, vector_weight=0.5, top_k=16, 
-                                                            dynamic_filtering=dynamic_filtering, 
-                                                            keywords_matching = keywords_matching,
-                                                            use_previous_context = use_prev_context,    
-                                                            custom_ranking=custom_ranking, 
-                                                            debug=debug_mode)
-        if not docs:
-            return func.HttpResponse("No relevant documents found.", status_code=404)
-        
-        # Step 2: Generate response from AI with retrieved context
-        ai_response = multi_index_generate_response(rewrited_query, docs, hide_ref_relevance=hide_ref_relevance)
-
-        return func.HttpResponse(json.dumps({"answer": ai_response}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
-
-    except Exception as e:
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
