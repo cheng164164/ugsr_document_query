@@ -14,9 +14,11 @@ from .indexer import *
 from azure.storage.queue import QueueClient
 from math import ceil
 
-
+set_env_vars(ENV_VARS)
 logging.basicConfig(level=logging.INFO)
 logging.info("🔁 index_creation HTTP trigger module loaded.")
+
+enable_grouping = True
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("🚀 HTTP trigger function started.")
@@ -29,43 +31,62 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         batch_size = 100  # adjust as needed
 
-        # Step 1: Determine first group
-        all_groups = sorted(set(cfg["group"] for cfg in INDEX_CONFIGS))
-        first_group = all_groups[0]
-        save_group_state(first_group, all_groups, connection_string)
+        if enable_grouping:
+            logging.info("🧩 Group-by-group mode is ENABLED.")
 
-        for config in [cfg for cfg in INDEX_CONFIGS if cfg["group"] == first_group]:
-            # Send init message FIRST
-            index_name = config["index_name"]
+            # Determine first group
+            all_groups = sorted(set(cfg["group"] for cfg in INDEX_CONFIGS))
+            first_group = all_groups[0]
 
-            init_message = json.dumps({
-                "action": "init_index",
-                "index_name": index_name
-            })
-            queue_client.send_message(base64.b64encode(init_message.encode("utf-8")).decode("utf-8"))
+            # Save initial group state to blob
+            save_group_state(first_group, all_groups, connection_string)
 
-            container_client = ContainerClient.from_connection_string(connection_string, config['document_container'])
-            blob_list = [b for b in container_client.list_blobs() if b.name != "index_log.csv"]
-            total_files = len(blob_list)
-            total_batches = ceil(total_files / batch_size)
+            # Enqueue only first group
+            for config in [cfg for cfg in INDEX_CONFIGS if cfg["group"] == first_group]:
+                enqueue_init_and_batches(config, queue_client, connection_string, batch_size)
 
-            for batch_number in range(total_batches):
-                message = json.dumps({
-                        "action": "start_indexing",
-                        "index_name": config["index_name"],
-                        "batch_number": batch_number,
-                        "batch_size": batch_size,
-                        "total_batches": total_batches
-                    })
-                encoded = base64.b64encode(message.encode("utf-8")).decode("utf-8")
-                queue_client.send_message(encoded, visibility_timeout=10)
 
-        logging.info("✅  First group message sent to queue.")
-        return func.HttpResponse("Message enqueued.", status_code=202)
+        else:
+            logging.info("📦 Group-by-group mode is DISABLED. Enqueueing all libraries.")
+            for config in INDEX_CONFIGS:
+                enqueue_init_and_batches(config, queue_client, connection_string, batch_size)
+
+        logging.info("✅ Indexing messages enqueued successfully.")
+        return func.HttpResponse("Message(s) enqueued.", status_code=202)
 
     except Exception as e:
         logging.exception("❌ Failed to enqueue message.")
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+
+
+def enqueue_init_and_batches(config, queue_client, blob_conn_str, batch_size):
+    index_name = config["index_name"]
+
+    container_client = ContainerClient.from_connection_string(blob_conn_str, config['document_container'])
+    blob_list = [b for b in container_client.list_blobs() if b.name != "index_log.csv"]
+    total_files = len(blob_list)
+    total_batches = ceil(total_files / batch_size)
+
+    # Send init message
+    init_msg = json.dumps({"action": "init_index", 
+                           "index_name": index_name, 
+                           "enable_grouping": enable_grouping, 
+                           "total_batches": total_batches})
+    queue_client.send_message(base64.b64encode(init_msg.encode("utf-8")).decode("utf-8"))
+
+    # Send batch messages
+    for batch_number in range(total_batches):
+        msg = json.dumps({
+            "action": "start_indexing",
+            "index_name": index_name,
+            "batch_number": batch_number,
+            "batch_size": batch_size,
+            "total_batches": total_batches,
+            "enable_grouping": enable_grouping
+        })
+        queue_client.send_message(base64.b64encode(msg.encode("utf-8")).decode("utf-8"), visibility_timeout=10)
+
+    logging.info(f"📨 Enqueued {total_batches} batch(es) for index: {index_name}")
 
 
 def save_group_state(current_group, all_groups, conn_str, container="index-logs"):

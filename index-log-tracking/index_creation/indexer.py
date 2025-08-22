@@ -186,12 +186,23 @@ def generate_blob_sas_url(connection_string, container_name, blob_name):
     )
     return f"{blob_client.url}?{sas_token}"
 
-def document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key):
-    client = DocumentIntelligenceClient(endpoint=azure_doc_intell_endpoint, credential=AzureKeyCredential(azure_doc_intell_key))
-    poller = client.begin_analyze_document("prebuilt-read", AnalyzeDocumentRequest(url_source=sas_url))
-    result = poller.result()
-    return result.content
+def document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, file_extension=None):
+    file_extension = file_extension.lower() if file_extension else None
+    if file_extension in [".csv"]:
+        df = pd.read_csv(sas_url)
+        return df.to_string(index=False)
 
+    elif file_extension in [".xls"]:
+        df = pd.read_excel(sas_url)
+        return df.to_string(index=False)
+
+    else:
+        client = DocumentIntelligenceClient(endpoint=azure_doc_intell_endpoint, credential=AzureKeyCredential(azure_doc_intell_key))
+        poller = client.begin_analyze_document("prebuilt-read", AnalyzeDocumentRequest(url_source=sas_url))
+        result = poller.result()
+        return result.content 
+    
+    
 def obtain_topics(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model):
     client = AzureOpenAI(
         azure_endpoint=azure_oai_endpoint,
@@ -317,20 +328,35 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
             continue
         
         file_name = blob.name
+        extension = os.path.splitext(file_name)[-1].lower()
         sas_url = generate_blob_sas_url(connection_string, container_name, file_name)
-        doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key)
+        doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, extension)
         topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
         terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
         summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model))
         ver, date = obtain_version_and_publish_date(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
         meta_row = metadata_df[metadata_df["Name"].str.lower() == os.path.basename(file_name).lower()]
         if meta_row.empty:
-            continue
-        idx = meta_row.index[0]
-        metadata_df.at[idx, "version"] = ver
-        metadata_df.at[idx, "publish date"] = date
+            # Create a new row with None values and the file name
+            new_row = {
+            "Name": os.path.basename(file_name),
+            "Title": None,
+            "url": None,
+            "Document Owner(s)": None,
+            "Doc Type": None,
+            "Doc Category": None,
+            "Function": None,
+            "version": ver,
+            "publish date": date
+            }
+            metadata_df = pd.concat([metadata_df, pd.DataFrame([new_row])], ignore_index=True)
+            meta = new_row
+        else:
+            idx = meta_row.index[0]
+            metadata_df.at[idx, "version"] = ver
+            metadata_df.at[idx, "publish date"] = date
+            meta = meta_row.iloc[0].to_dict()
 
-        meta = meta_row.iloc[0].to_dict()
         chunks = splitter.create_documents([doc_content])
         if using_embedder:
             vectors = embedder.embed_documents([chunk.page_content for chunk in chunks])
@@ -343,12 +369,12 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
             indexed_docs.append({
                 "id": make_doc_id(file_name.lower(), chunk_id),
                 "filename": file_name.lower(),
-                "title": meta.get("Title", "").strip().lower(),
-                "url": meta["url"],
-                "owner": meta.get("Document Owner(s)", "").strip().lower(),
-                "doc_type": meta.get("Doc Type", "").strip().lower(),
-                "doc_category": meta.get("Doc Category", "").strip().lower(),
-                "doc_function": meta.get("Function", "").strip().lower(),
+                "title": (meta.get("Title") or "").strip().lower(),
+                "url": (meta.get("url") or "").strip().lower(),
+                "owner": (meta.get("Document Owner(s)") or "").strip().lower(),
+                "doc_type": (meta.get("Doc Type") or "").strip().lower(),
+                "doc_category": (meta.get("Doc Category") or "").strip().lower(),
+                "doc_function": (meta.get("Function") or "").strip().lower(),
                 "terms": terms,
                 "topics": topics,
                 "summary": summary,
@@ -419,8 +445,9 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
         
         try:
             file_name = blob.name
+            extension = os.path.splitext(file_name)[-1].lower()
             sas_url = generate_blob_sas_url(connection_string, container_name, blob.name)
-            doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key)
+            doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, extension)
             topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
             terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
             summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model))
@@ -429,14 +456,26 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
             # print(f"doc_content: {doc_content}\n** topics: {topics}\n** terms: {terms}\n** summary: {summary}")
             meta_row = metadata_df[metadata_df["Name"].str.lower() == os.path.basename(blob.name).lower()]
             if meta_row.empty:
-                print(f"⚠️  Skipped (no metadata): {blob.name}")
-                continue
+                # Create a new row with None values and the file name
+                new_row = {
+                "Name": os.path.basename(file_name),
+                "Title": None,
+                "url": None,
+                "Document Owner(s)": None,
+                "Doc Type": None,
+                "Doc Category": None,
+                "Function": None,
+                "version": ver,
+                "publish date": date
+                }
+                metadata_df = pd.concat([metadata_df, pd.DataFrame([new_row])], ignore_index=True)
+                meta = new_row
+            else:
+                idx = meta_row.index[0]
+                metadata_df.at[idx, "version"] = ver
+                metadata_df.at[idx, "publish date"] = date
+                meta = meta_row.iloc[0].to_dict()
 
-            idx = meta_row.index[0]
-            metadata_df.at[idx, "version"] = ver
-            metadata_df.at[idx, "publish date"] = date
-
-            meta = meta_row.iloc[0].to_dict()
             chunks = splitter.create_documents([doc_content])
 
             if using_embedder:
@@ -450,12 +489,12 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
                 indexed_docs.append({
                     "id": make_doc_id(file_name.lower(), chunk_id),
                     "filename": file_name.lower(),
-                    "title": meta.get("Title", "").strip().lower(),
-                    "url": meta["url"],
-                    "owner": meta.get("Document Owner(s)", "").strip().lower(),
-                    "doc_type": meta.get("Doc Type", "").strip().lower(),
-                    "doc_category": meta.get("Doc Category", "").strip().lower(),
-                    "doc_function": meta.get("Function", "").strip().lower(),
+                    "title": (meta.get("Title") or "").strip().lower(),
+                    "url": (meta.get("url") or "").strip().lower(),
+                    "owner": (meta.get("Document Owner(s)") or "").strip().lower(),
+                    "doc_type": (meta.get("Doc Type") or "").strip().lower(),
+                    "doc_category": (meta.get("Doc Category") or "").strip().lower(),
+                    "doc_function": (meta.get("Function") or "").strip().lower(),
                     "terms": terms,
                     "topics": topics,
                     "summary": summary,

@@ -13,10 +13,13 @@ ENV_VARS = {
     "AZURE_SEARCH_ENDPOINT": "<your_search_endpoint>",
     "AZURE_SEARCH_KEY": "<your_search_key>",
     "AZURE_OPENAI_ENDPOINT": "<your_openai_endpoint>",
-    "AZURE_EMBEDDING_DEPLOYMENT_NAME": "<your_embedding_deployment_name>"
+    "AZURE_EMBEDDING_DEPLOYMENT_NAME": "<your_embedding_deployment_name>",
+    "QUEUE_NAME": "<your_queue_name>"
 }
 
 
+
+#### Chatbot "Kimmi"
 INDEX_CONFIGS = [
     {
         "index_name": "ugsr_index_v2",
@@ -37,7 +40,7 @@ INDEX_CONFIGS = [
         "metadata_container": "all-regions-documents-metadata",
         "metadata_blob": "auto_extraction/all_regions_metadata_new.csv",
         "document_container": "all-regions-documents",
-        "group": 2
+        "group": 1
     },
     {
         "index_name": "ehs_index_v2",
@@ -51,8 +54,8 @@ INDEX_CONFIGS = [
         "metadata_container": "policy-center-documents-metadata",
         "metadata_blob": "auto_extraction/policy_center_metadata_new.csv",
         "document_container": "policy-center-documents",
-        "group": 3
-    }
+        "group": 2
+    },
 ]
 
 SCHEMA_MAPPING_DICT = {
@@ -103,3 +106,30 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     },    
 }
+
+
+'''
+#### Chatbot "Andy"
+INDEX_CONFIGS = [
+    {
+        "index_name": "dev_hub_index",
+        "metadata_container": "development-hub-document-metadata",
+        "metadata_blob": "auto_extraction/development_hub_metadata_new.csv",
+        "document_container": "development-hub-documents",
+        "group": 1
+    },
+]
+
+SCHEMA_MAPPING_DICT = {
+    ### Mapping of standard schema -> metadata columns
+    "dev_hub_index": {
+        "Name": "Name",
+        "Title": None,
+        "Doc Type": None,
+        "Document Owner(s)": "Document Owner(s)",
+        "Doc Category": "Doc Category",
+        "Function": None, # No direct mapping
+        "url": "url"
+    } 
+}
+'''

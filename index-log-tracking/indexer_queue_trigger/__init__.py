@@ -2,6 +2,7 @@ import os
 import base64
 import logging
 import json
+from math import ceil
 import azure.functions as func
 from index_creation.config import ENV_VARS, INDEX_CONFIGS, SCHEMA_MAPPING_DICT
 from index_creation.util import set_env_vars, clean_metadata
@@ -16,6 +17,8 @@ from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
 
 
 logging.info("🔄 indexer_queue_trigger module loaded.")
+
+set_env_vars(ENV_VARS)
 
 connection_string = os.getenv('AZURE_BLOB_CONN_STRING')
 azure_doc_intell_endpoint = os.getenv('AZURE_DOC_INTELL_ENDPOINT')
@@ -34,13 +37,13 @@ def main(msg: func.QueueMessage) -> None:
     logging.info("⚙️ Queue trigger function started.")
     try:
         raw = msg.get_body().decode("utf-8")
-        logging.info(f"📩 Raw queue message: {raw}")
         payload = json.loads(raw)
         index_name = payload.get("index_name")
         action = payload.get("action")
+        enable_grouping = payload.get("enable_grouping", True)
 
         if not action or not index_name:
-            logging.warning("⚠️ No index_name provided in payload")
+            logging.warning("⚠️ Missing action or index_name in message")
             return
 
         config = next((c for c in INDEX_CONFIGS if c["index_name"] == index_name), None)
@@ -48,107 +51,139 @@ def main(msg: func.QueueMessage) -> None:
             logging.warning(f"⚠️ No config found for index: {index_name}")
             return
 
-        logging.info(f"✅ Started indexing for: {index_name}")
         if action == "init_index":
-            # One-time init: delete log, create index, write empty log
             delete_existing_log_blob(index_name, connection_string)
-            create_index(config['index_name'], search_key, search_endpoint)
-            save_index_log(index_name, {
-                "index_name": index_name,
-                "batches": []
-            }, connection_string)
+            create_index(index_name, search_key, search_endpoint)
+            save_index_log(index_name, {"index_name": index_name, "batches": [], "total_batches": payload.get("total_batches")}, connection_string)
             logging.info(f"✅ Initialized index and log for: {index_name}")
             return
-        
+
         elif action == "start_indexing":
             batch_number = payload.get("batch_number")
             batch_size = payload.get("batch_size")
             total_batches = payload.get("total_batches")
+
             if batch_number is None or batch_size is None:
-                logging.warning("⚠️ Missing batch_number or batch_size in message payload")
+                logging.warning("⚠️ Missing batch_number or batch_size")
                 return
 
             log = load_index_log(index_name, connection_string)
             run_index_job(config, log, batch_number, batch_size, total_batches)
             logging.info(f"✅ Finished batch {batch_number} for index: {index_name}")
 
+            if enable_grouping:
+                group_num = config.get("group")
+
+                if check_if_group_complete(group_num, connection_string):
+                    group_state = load_group_state(connection_string)
+                    if group_state["current_group"] == group_num:
+                        all_groups = group_state["all_groups"]
+                        current_idx = all_groups.index(group_num)
+
+                        if current_idx + 1 < len(all_groups):
+                            next_group = all_groups[current_idx + 1]
+                            queue_client = QueueClient.from_connection_string(os.getenv("AzureWebJobsStorage"), "indexing-requests")
+
+                            for next_config in [c for c in INDEX_CONFIGS if c["group"] == next_group]:
+                                enqueue_init_and_batches(next_config, queue_client, connection_string, enable_grouping=True)
+
+                            save_group_state(next_group, all_groups, connection_string)
+                            logging.info(f"📦 Queued group {next_group}")
         else:
             logging.warning(f"⚠️ Unknown action: {action}")
 
     except Exception as e:
         logging.exception(f"❌ Failed to process message: {e}")
-        log_failed_message_to_blob(
-            msg_body=raw,
-            reason=str(e),
-            storage_conn_str=connection_string,
-            container="failed-index-jobs",
-            blob_prefix="failed-index-jobs"
-        )
-
+        log_failed_message_to_blob(raw, str(e), connection_string, "failed-index-jobs", "failed-index-jobs")
 
 def run_index_job(config, log, batch_number, batch_size, total_batches):
-    try:
-        set_env_vars(ENV_VARS=ENV_VARS)
+    set_env_vars(ENV_VARS=ENV_VARS)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    embedder = AzureOpenAIEmbeddings(
+        azure_deployment=azure_oai_embedding_deployment,
+        openai_api_key=azure_oai_key,
+        openai_api_version=azure_openai_api_version,
+        azure_endpoint=azure_oai_endpoint
+    )
+    embedder_client = AzureOpenAI(
+        azure_endpoint=azure_oai_endpoint,
+        api_key=azure_oai_key,
+        api_version=azure_openai_api_version
+    )
 
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        embedder = AzureOpenAIEmbeddings(
-            azure_deployment=azure_oai_embedding_deployment,
-            openai_api_key=azure_oai_key,
-            openai_api_version=azure_openai_api_version,
-            azure_endpoint=azure_oai_endpoint
-        )
+    metadata_df = read_metadata_from_blob(connection_string, config['metadata_container'], config['metadata_blob'])
+    metadata_df = clean_metadata(metadata_df, SCHEMA_MAPPING_DICT, config['index_name'])
 
-        embedder_client = AzureOpenAI(
-            azure_endpoint=azure_oai_endpoint,
-            api_key=azure_oai_key,
-            api_version=azure_openai_api_version
-        )
+    container_client = ContainerClient.from_connection_string(connection_string, config['document_container'])
+    blob_list = [b.name for b in container_client.list_blobs() if b.name != "index_log.csv"]
 
-        logging.info(f"=== Creating index: {config['index_name']} ===")
-        metadata_df = read_metadata_from_blob(connection_string, config['metadata_container'], config['metadata_blob'])
-        metadata_df = clean_metadata(metadata_df, SCHEMA_MAPPING_DICT, config['index_name'])
-        logging.info(f"Metadata loaded with {len(metadata_df)} rows.")
+    start = batch_number * batch_size
+    end = min(start + batch_size, len(blob_list))
+    blobs_to_process = blob_list[start:end]
 
-        container_client = ContainerClient.from_connection_string(connection_string, config['document_container'])
-        blob_list = [b.name for b in container_client.list_blobs() if b.name != "index_log.csv"]
+    if batch_number in {b["batch_number"] for b in log.get("batches", []) if b["status"] == "uploaded"}:
+        logging.info(f"⏩ Skipping already uploaded batch {batch_number}")
+        return
 
-        total_files = len(blob_list)
-        logging.info(f"Found {total_files} blobs in container '{config['document_container']}'")
+    metadata_df = data_chunk_embed_upload_batch(
+        splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
+        config['metadata_container'], config['metadata_blob'], config['index_name'],
+        azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key,
+        azure_oai_deployment_model, using_embedder=True, batch_number=batch_number,
+        batch_size=batch_size, total_batches=total_batches, blob_subset=blobs_to_process
+    )
 
-        start = batch_number * batch_size
-        end = min(start + batch_size, total_files)
-        blobs_to_process = blob_list[start:end]
+    update_batch_log(config["index_name"], batch_number, "uploaded", connection_string)
 
-        if batch_number in {b["batch_number"] for b in log.get("batches", []) if b["status"] == "uploaded"}:
-            logging.info(f"⏩ Skipping already uploaded batch {batch_number}")
-            return
-        
-        logging.info(f"--- Running batch {batch_number + 1} for index {config['index_name']} ---")
-        metadata_df = data_chunk_embed_upload_batch(
-                            splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
-                            config['metadata_container'], config['metadata_blob'], config['index_name'],
-                            azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key,
-                            azure_oai_deployment_model, using_embedder=True, batch_number=batch_number,
-                            batch_size=batch_size, total_batches=total_batches, blob_subset=blobs_to_process
-        )
-        
-        # ✅ Mark batch as uploaded and save safely
-        update_batch_log(
-            index_name=config["index_name"],
-            batch_number=batch_number,
-            status="uploaded",
-            connection_string=connection_string
-        )
+def enqueue_init_and_batches(config, queue_client, conn_str, enable_grouping=True, batch_size=100):
+    index_name = config["index_name"]
+    container_client = ContainerClient.from_connection_string(conn_str, config['document_container'])
+    blob_list = [b for b in container_client.list_blobs() if b.name != "index_log.csv"]
+    total_files = len(blob_list)
+    total_batches = ceil(total_files / batch_size)
+    init_msg = json.dumps({
+        "action": "init_index",
+        "index_name": index_name,
+        "enable_grouping": enable_grouping,
+        "total_batches": total_batches
+    })
+    queue_client.send_message(base64.b64encode(init_msg.encode("utf-8")).decode("utf-8"))
+    for batch_number in range(total_batches):
+        msg = json.dumps({
+            "action": "start_indexing",
+            "index_name": index_name,
+            "batch_number": batch_number,
+            "batch_size": batch_size,
+            "total_batches": total_batches,
+            "enable_grouping": enable_grouping
+        })
+        queue_client.send_message(base64.b64encode(msg.encode("utf-8")).decode("utf-8"), visibility_timeout=10)
 
-    except Exception as e:
-        logging.error(f"❌ Failed batch {batch_number} for {config['index_name']}: {e}")
-        update_batch_log(
-            index_name=config["index_name"],
-            batch_number=batch_number,
-            status="failed",
-            error=str(e),
-            connection_string=connection_string
-        )
+def load_group_state(conn_str, container="index-logs"):
+    blob = BlobServiceClient.from_connection_string(conn_str).get_blob_client(container, "group_state.json")
+    return json.loads(blob.download_blob().readall())
+
+def save_group_state(current_group, all_groups, conn_str, container="index-logs"):
+    state = {"current_group": current_group, "all_groups": all_groups}
+    blob = BlobServiceClient.from_connection_string(conn_str).get_blob_client(container, "group_state.json")
+    blob.upload_blob(json.dumps(state, indent=2), overwrite=True)
+
+def check_if_group_complete(group_number, conn_str, container="index-logs"):
+    group_indexes = [cfg["index_name"] for cfg in INDEX_CONFIGS if cfg.get("group") == group_number]
+    for index_name in group_indexes:
+        try:
+            log = load_index_log(index_name, conn_str, container)
+            total_batches = log.get("total_batches", 0)
+            if total_batches == 0:
+                logging.warning(f"⚠️ No batches found for index {index_name}")
+                return False
+            uploaded_batches = {b["batch_number"] for b in log.get("batches", []) if b["status"] == "uploaded"}
+            if len(uploaded_batches) < total_batches:
+                return False
+        except Exception as e:
+            logging.warning(f"⚠️ Could not verify log for index {index_name}: {e}")
+            return False
+    return True
 
 
 def log_failed_message_to_blob(msg_body: str, reason: str, storage_conn_str: str, container: str, blob_prefix: str):
@@ -239,22 +274,3 @@ def update_batch_log(index_name, batch_number, status, connection_string, error=
     except Exception as e:
         logging.error(f"❌ Failed to update batch log for index '{index_name}': {e}")
     
-
-
-def check_if_group_complete(group_number, connection_string, container="index-logs"):
-    """
-    Returns True if all indexes in the group have all batches marked as uploaded.
-    """
-    group_indexes = [cfg["index_name"] for cfg in INDEX_CONFIGS if cfg["group"] == group_number]
-    for index_name in group_indexes:
-        try:
-            log = load_index_log(index_name, connection_string, container)
-            total_batches = max((b["batch_number"] for b in log.get("batches", [])), default=-1) + 1
-            uploaded_batches = {b["batch_number"] for b in log.get("batches", []) if b["status"] == "uploaded"}
-
-            if len(uploaded_batches) < total_batches:
-                return False
-        except Exception as e:
-            logging.warning(f"⚠️ Could not verify log for index {index_name}: {e}")
-            return False
-    return True
