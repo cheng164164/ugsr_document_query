@@ -1,3 +1,4 @@
+##################### General Settings ######################################
 ENV_VARS = {
     "AZURE_BLOB_CONN_STRING": "<your_blob_connection_string>",
     "AZURE_OPENAI_KEY": "<your_openai_key>",
@@ -20,6 +21,9 @@ feature_flags = {
     "hide_ref_relevance": True    # Set to True to hide relevance explanation in the reference section
 }
 
+
+
+######################### Chatbot Config ######################################
 ### Chatbot Kimmi
 # Define mutli indexes names to search
 index_names = ["business_index",

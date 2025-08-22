@@ -4,8 +4,8 @@ import os
 
 ENV_VARS = {
     "AZURE_BLOB_CONN_STRING": "<your_blob_connection_string>",
-    "AZURE_DOC_INTELL_ENDPOINT": "<your_doc_intell_endpoint>",
-    "AZURE_DOC_INTELL_KEY": "<your_doc_intell_key>",
+    "AZURE_DOC_INTELL_ENDPOINT": "<your_document_intelligence_endpoint>",
+    "AZURE_DOC_INTELL_KEY": "<your_document_intelligence_key>",
     "AZURE_OPENAI_DEPLOYMENT_ENDPOINT": "<your_openai_deployment_endpoint>",
     "AZURE_OPENAI_KEY": "<your_openai_key>",
     "AZURE_OPENAI_DEPLOYMENT_NAME": "<your_openai_deployment_name>",
@@ -18,6 +18,7 @@ ENV_VARS = {
 }
 
 
+########################################################################################
 
 #### Chatbot "Kimmi"
 INDEX_CONFIGS = [
@@ -108,12 +109,13 @@ SCHEMA_MAPPING_DICT = {
 }
 
 
+###############################################################################
 '''
 #### Chatbot "Andy"
 INDEX_CONFIGS = [
     {
-        "index_name": "dev_hub_index",
-        "metadata_container": "development-hub-document-metadata",
+        "index_name": "dev_hub_index_v2",
+        "metadata_container": "development-hub-documents-metadata",
         "metadata_blob": "auto_extraction/development_hub_metadata_new.csv",
         "document_container": "development-hub-documents",
         "group": 1
@@ -122,7 +124,7 @@ INDEX_CONFIGS = [
 
 SCHEMA_MAPPING_DICT = {
     ### Mapping of standard schema -> metadata columns
-    "dev_hub_index": {
+    "dev_hub_index_v2": {
         "Name": "Name",
         "Title": None,
         "Doc Type": None,

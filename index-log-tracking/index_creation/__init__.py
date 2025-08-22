@@ -26,7 +26,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         conn_str = os.getenv("AzureWebJobsStorage")
         connection_string = os.getenv("AZURE_BLOB_CONN_STRING")
 
-        queue_name = "indexing-requests"
+        queue_name = os.getenv("QUEUE_NAME")
         queue_client = QueueClient.from_connection_string(conn_str, queue_name)
 
         batch_size = 100  # adjust as needed
