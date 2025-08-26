@@ -42,17 +42,21 @@ def clean_metadata(df, schema_mapping_dict, index_name):
     df = df.fillna("")
 
     # Merge duplicate file names by concatenating differing values with ';'
-    if 'Name' in df.columns:
-        group_cols = [col for col in df.columns if col != 'Name']
+    try:    
+        if 'Name' in df.columns:
+            group_cols = [col for col in df.columns if col != 'Name']
 
-        def merge_rows(group):
-            merged = {}
-            merged['Name'] = group.name
-            for col in group_cols:
-                merged[col] = '; '.join(sorted(set(val for val in group[col] if val)))
-            return pd.Series(merged)
+            def merge_rows(group):
+                merged = {}
+                merged['Name'] = group.name
+                for col in group_cols:
+                    values = set(str(val) for val in group[col] if pd.notna(val) and val != "")
+                    merged[col] = '; '.join(sorted(values))
+                return pd.Series(merged)
 
-        df = df.groupby('Name').apply(merge_rows).reset_index(drop=True)
+            df = df.groupby('Name').apply(merge_rows).reset_index(drop=True)
+    except:
+        pass
     return df
 
 

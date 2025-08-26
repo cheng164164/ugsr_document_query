@@ -12,7 +12,7 @@ import io
 import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, feature_flags
-from .util import set_env_vars 
+from .util import * 
 
 
 set_env_vars(ENV_VARS)
@@ -740,8 +740,8 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
             main_answer += (
                 "\n\n---\n Please refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
                 "**Document**:"
-                f"  [{doc.get('filename', 'N/A')}]({doc.get('url', 'N/A')})\n\n"
-                f"**Key Contact**: {doc.get('owner', 'N/A')}"
+                f"  [{title_case_filename(doc.get('filename', 'N/A'))}]({doc.get('url', 'N/A')})\n\n"
+                f"**Key Contact**: {title_case_name(doc.get('owner', 'N/A'))}"
             )
         
         if warning_msg:
@@ -780,11 +780,13 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
     reference_text = "\n\n**References:**\n"
 
     for doc in list(doc_groups.values())[:3]:
+        document_name = title_case_filename(doc['document_name'])
+        key_contact = title_case_name(doc['key_contact']) 
         if hide_ref_relevance:
             reference_text += (
                 f"\n---\n"
-                f"**Document**: [{doc['document_name']}]({doc['url']})\n\n"
-                f"**Key Contact**: {doc['key_contact']}\n\n"
+                f"**Document**: [{document_name}]({doc['url']})\n\n"
+                f"**Key Contact**: {key_contact}\n\n"
             )
             continue
 
@@ -822,8 +824,8 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
 
         reference_text += (
                 f"\n---\n"
-                f"**Document**: [{doc['document_name']}]({doc['url']})\n\n"
-                f"**Key Contact**: {doc['key_contact']}\n\n"
+                f"**Document**: [{document_name}]({doc['url']})\n\n"
+                f"**Key Contact**: {key_contact}\n\n"
                 # f" **Similarity Score**: {avg_score}\n\n"
                 f"**Relevance**: {relevance_summary}\n\n"
         )

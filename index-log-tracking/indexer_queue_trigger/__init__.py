@@ -128,7 +128,7 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
     metadata_df = data_chunk_embed_upload_batch(
         splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
         config['metadata_container'], config['metadata_blob'], config['index_name'],
-        azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key,
+        azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, azure_openai_api_version,
         azure_oai_deployment_model, using_embedder=True, batch_number=batch_number,
         batch_size=batch_size, total_batches=total_batches, blob_subset=blobs_to_process
     )

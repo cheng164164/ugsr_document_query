@@ -174,17 +174,33 @@ def list_blobs(connection_string, container_name):
     return [b for b in container_client.list_blobs() if b.name != "index_log.csv"]
 
 def generate_blob_sas_url(connection_string, container_name, blob_name):
-    blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-    sas_token = generate_blob_sas(
-        account_name=blob_client.account_name,
-        container_name=container_name,
-        blob_name=blob_name,
-        account_key=blob_service_client.credential.account_key,
-        permission=BlobSasPermissions(read=True),
-        expiry=datetime.utcnow() + timedelta(hours=1)
-    )
-    return f"{blob_client.url}?{sas_token}"
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+
+        if not blob_client.exists():
+            print(f"❌ Blob does not exist: {blob_name}")
+            return None
+        
+        account_name = blob_service_client.account_name
+        account_key = None
+        if hasattr(blob_service_client.credential, 'account_key'):
+            account_key = blob_service_client.credential.account_key
+        if not account_key:
+            raise ValueError("❌ Could not extract account key for SAS generation.")
+        sas_token = generate_blob_sas(
+            account_name=blob_client.account_name,
+            container_name=container_name,
+            blob_name=blob_name,
+            account_key=blob_service_client.credential.account_key,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.utcnow() + timedelta(hours=1)
+        )
+        return f"{blob_client.url}?{sas_token}"
+    
+    except Exception as e:
+        print(f"❌ Error generating SAS URL for blob {blob_name}: {e}")
+        return None
 
 def document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, file_extension=None):
     file_extension = file_extension.lower() if file_extension else None
@@ -203,11 +219,11 @@ def document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, file
         return result.content 
     
     
-def obtain_topics(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model):
+def obtain_topics(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version):
     client = AzureOpenAI(
         azure_endpoint=azure_oai_endpoint,
         api_key=azure_oai_key,
-        api_version="2025-01-01-preview",
+        api_version=azure_openai_api_version,
     )
     messages = [{"role": "user", "content": f"Obtain all the main topics mentioned in this document. Keep your response short and just include the topics. Also, include the scope and purpose. Here is the document Content: {context}"}]
     completion = client.chat.completions.create(
@@ -216,11 +232,11 @@ def obtain_topics(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployme
     )
     return completion.choices[0].message.content
 
-def obtain_key_terms(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model):
+def obtain_key_terms(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version):
     client = AzureOpenAI(
         azure_endpoint=azure_oai_endpoint,
         api_key=azure_oai_key,
-        api_version="2025-01-01-preview",
+        api_version=azure_openai_api_version,
     )
     messages = [{"role": "user", "content": f"Obtain key terminology used in this document. Keep your response short and just include the terms. Here is the document Content: {context}"}]
     completion = client.chat.completions.create(
@@ -229,11 +245,11 @@ def obtain_key_terms(context, azure_oai_endpoint, azure_oai_key, azure_oai_deplo
     )
     return completion.choices[0].message.content
 
-def obtain_summary(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model):
+def obtain_summary(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version):
     client = AzureOpenAI(
         azure_endpoint=azure_oai_endpoint,
         api_key=azure_oai_key,
-        api_version="2025-01-01-preview",
+        api_version=azure_openai_api_version,
     )
     messages = [{"role": "user", "content": f"Obtain the summary of the document. Keep your response short under 200 words. Here is the document Content: {context}"}]
     completion = client.chat.completions.create(
@@ -250,13 +266,13 @@ def truncate_summary(text, max_chars=4000):
     return truncated[:end+1] if end > 0 else truncated
 
 
-def obtain_version_and_publish_date(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model):
+def obtain_version_and_publish_date(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version):
     from openai import AzureOpenAI
 
     client = AzureOpenAI(
         azure_endpoint=azure_oai_endpoint,
         api_key=azure_oai_key,
-        api_version="2025-01-01-preview",
+        api_version=azure_openai_api_version,
     )
 
     messages = [
@@ -310,7 +326,7 @@ def make_doc_id(file_key: str, chunk_id: int) -> str:
 
 
 def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
-                         azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, 
+                         azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, azure_openai_api_version,
                          azure_oai_deployment_model, using_embedder=True):
     
     # Ensure version and publish_date columns exist
@@ -331,10 +347,10 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
         extension = os.path.splitext(file_name)[-1].lower()
         sas_url = generate_blob_sas_url(connection_string, container_name, file_name)
         doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, extension)
-        topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
-        terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
-        summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model))
-        ver, date = obtain_version_and_publish_date(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
+        topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version)
+        terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version)
+        summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version))
+        ver, date = obtain_version_and_publish_date(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version)
         meta_row = metadata_df[metadata_df["Name"].str.lower() == os.path.basename(file_name).lower()]
         if meta_row.empty:
             # Create a new row with None values and the file name
@@ -383,7 +399,7 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
             })
 
     # Save updated metadata_df to blob using separate function
-    save_metadata_to_blob(metadata_df, connection_string, container_name, metadata_blob_name)
+    save_metadata_to_blob(metadata_df, connection_string, metadata_container, metadata_blob_name)
     return indexed_docs
 
 
@@ -395,8 +411,8 @@ def upload_search_index(index_name, search_key, search_endpoint, indexed_docs):
 
 
 def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
-                  index_name, azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, 
-                  azure_oai_key, azure_oai_deployment_model, using_embedder=True, batch_number=0, batch_size=30, total_batches=None, blob_subset=None):
+                  index_name, azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, azure_openai_api_version, 
+                  azure_oai_deployment_model, using_embedder=True, batch_number=0, batch_size=30, total_batches=None, blob_subset=None):
     
     from azure.storage.blob import ContainerClient
     from azure.core.credentials import AzureKeyCredential
@@ -446,10 +462,10 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
             extension = os.path.splitext(file_name)[-1].lower()
             sas_url = generate_blob_sas_url(connection_string, container_name, blob.name)
             doc_content = document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, extension)
-            topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
-            terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
-            summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model))
-            ver, date = obtain_version_and_publish_date(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model)
+            topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version)
+            terms = obtain_key_terms(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version)
+            summary = truncate_summary(obtain_summary(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version))
+            ver, date = obtain_version_and_publish_date(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version)
 
             # print(f"doc_content: {doc_content}\n** topics: {topics}\n** terms: {terms}\n** summary: {summary}")
             meta_row = metadata_df[metadata_df["Name"].str.lower() == os.path.basename(blob.name).lower()]
