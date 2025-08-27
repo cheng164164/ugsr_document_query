@@ -7,6 +7,7 @@ pytz
 databricks-sql-connector
 azure-identity
 azure-keyvault-secrets
+xlrd
 
 
 azure-search-documents==11.6.0b12

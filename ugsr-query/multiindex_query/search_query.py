@@ -365,11 +365,14 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
         "content": (
             "You are a validation agent. Your job is to decide if the provided CONTEXT truly answers the USER QUESTION.\n"
             "Be strict. If the context uses different terms, systems, or services than the question, reply 'no'.\n"
-            "Do not infer answers. Only consider exact term matches.\n"
-            "Your reply must start with 'yes' or 'no'. Then give a brief reason why."
-            "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about,"
-            "especially if it's somewhat related to the question. This helps guide the user toward a more appropriate query."
-            "In the end ask user 'Would you like to clarify your question?'."
+            "Only consider exact term matches. \n"
+            "Do not infer or guess intent beyond what the context supports. Do NOT introduce unrelated interpretations of words based on common alternative meanings.\n"
+            "Only consider what is explicitly stated in the context.\n"
+            "Your reply must start with 'yes' or 'no'. Then give a brief reason why.\n"
+            "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about — but DO NOT mention any unrelated definitions or meanings of user terms.\n"
+            "The purpose of explainaton is also to help guide the user toward a more appropriate query.\n"
+            "If the query partially matches certain keywords in the CONTEXT, prompt the user for clarification, but ONLY based on the meaning used within the CONTEXT.\n"
+            "End by asking: 'Would you like to clarify your question?'"
         )
     }
     user_msg = {
@@ -401,6 +404,7 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
                     f"CONTEXT:{context_text}\n"
                     f"INSTRUCTIONS: \n"
                     f" - If at least partial of keywords or terms match between the user query and provded context, then consider it as RELEVANT. \n" 
+                    f" - Do not classify a question as IRRELEVANT just because it contains words that have other meanings.\n"
                     f" - Reply with one word only: RELEVANT or IRRELEVANT."
                 )
             }
@@ -736,12 +740,22 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         )
 
         if not is_completely_irrelevant and top_chunks:
-            doc = top_chunks[0]
+            top3 = top_chunks[:3]
+            file_votes = {}
+
+            for chunk in top3:
+                filename = chunk.get('filename', 'N/A')
+                if filename not in file_votes:
+                    file_votes[filename] = {'count': 0, 'chunk': chunk}
+                file_votes[filename]['count'] += 1
+
+            # Determine which document has the most votes
+            most_common_doc = max(file_votes.values(), key=lambda x: x['count'])['chunk']
             main_answer += (
                 "\n\n---\n Please refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
                 "**Document**:"
-                f"  [{title_case_filename(doc.get('filename', 'N/A'))}]({doc.get('url', 'N/A')})\n\n"
-                f"**Key Contact**: {title_case_name(doc.get('owner', 'N/A'))}"
+                f"  [{title_case_filename(most_common_doc.get('filename', 'N/A'))}]({most_common_doc.get('url', 'N/A')})\n\n"
+                f"**Key Contact**: {title_case_name(most_common_doc.get('owner', 'N/A'))}"
             )
         
         if warning_msg:
@@ -756,7 +770,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
                     f"QUESTION: {query}\n\n"
                     f"DOCUMENT CHUNKS:\n{context_str}\n\n"
                     f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
-                    # f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
+                    f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
                     f"If the answer is not clearly stated in the provided context, or you are unsure, respond with: 'Sorry, I cannot help with that.' Then briely expalain reasoning."
                     f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
                     f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"

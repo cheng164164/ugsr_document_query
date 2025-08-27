@@ -51,7 +51,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
         # Step 1: Search all indexes
-        docs = multi_index_search_documents(cleaned_query, rewrited_query, index_names, vector_weight=0.5, top_k=16, 
+        docs = multi_index_search_documents(cleaned_query, rewrited_query, index_names, vector_weight=0.6, top_k=16, 
                                                             dynamic_filtering=dynamic_filtering, 
                                                             keywords_matching = keywords_matching,
                                                             use_previous_context = use_prev_context,    

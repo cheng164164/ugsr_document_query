@@ -25,6 +25,7 @@ feature_flags = {
 
 ######################### Chatbot Config ######################################
 ### Chatbot Kimmi
+'''
 # Define mutli indexes names to search
 index_names = ["business_index",
                "ugsr_index",
@@ -50,10 +51,10 @@ share_point_urls = {
     "all_regions_index": {'name': 'Business Docuemnts All Regions', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"},
     "policy_center_index": {'name': 'Policy Center Documents', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"}
 }
-
-
-
 '''
+
+
+
 ### Chatbot Andy
 index_names = ["dev_hub_index"
               ]
@@ -67,4 +68,3 @@ metadata_files = {
 share_point_urls = {
     "dev_hub_index": {'name': 'Development Hub Documents', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/All%20Documents/Forms/AllItems.aspx"}
 }
-'''

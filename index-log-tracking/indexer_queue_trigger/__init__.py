@@ -54,7 +54,7 @@ def main(msg: func.QueueMessage) -> None:
         if action == "init_index":
             delete_existing_log_blob(index_name, connection_string)
             create_index(index_name, search_key, search_endpoint)
-            save_index_log(index_name, {"index_name": index_name, "batches": [], "total_batches": payload.get("total_batches")}, connection_string)
+            save_index_log(index_name, {"index_name": index_name, "group": config.get("group"), "batches": [], "total_batches": payload.get("total_batches")}, connection_string)
             logging.info(f"✅ Initialized index and log for: {index_name}")
             return
 
@@ -85,7 +85,7 @@ def main(msg: func.QueueMessage) -> None:
                             queue_client = QueueClient.from_connection_string(os.getenv("AzureWebJobsStorage"), "indexing-requests")
 
                             for next_config in [c for c in INDEX_CONFIGS if c["group"] == next_group]:
-                                enqueue_init_and_batches(next_config, queue_client, connection_string, enable_grouping=True)
+                                enqueue_init_and_batches(next_config, queue_client, connection_string, enable_grouping=True, batch_size=batch_size)
 
                             save_group_state(next_group, all_groups, connection_string)
                             logging.info(f"📦 Queued group {next_group}")
@@ -163,10 +163,28 @@ def load_group_state(conn_str, container="index-logs"):
     blob = BlobServiceClient.from_connection_string(conn_str).get_blob_client(container, "group_state.json")
     return json.loads(blob.download_blob().readall())
 
-def save_group_state(current_group, all_groups, conn_str, container="index-logs"):
-    state = {"current_group": current_group, "all_groups": all_groups}
-    blob = BlobServiceClient.from_connection_string(conn_str).get_blob_client(container, "group_state.json")
-    blob.upload_blob(json.dumps(state, indent=2), overwrite=True)
+def save_group_state(current_group, all_groups, conn_str, container="index-logs", status=None):
+    try:
+        state = {
+            "current_group": current_group,
+            "all_groups": all_groups
+        }
+        if status is not None:
+            # this is where "All completed" gets set
+            state["status"] = status
+        else:
+            # Preserve previous status if available
+            try:
+                existing = load_group_state(conn_str, container)
+                if "status" in existing:
+                    state["status"] = existing["status"]
+            except Exception:
+                pass  # Silent fail is okay
+
+        blob = BlobServiceClient.from_connection_string(conn_str).get_blob_client(container, "group_state.json")
+        blob.upload_blob(json.dumps(state, indent=2), overwrite=True)
+    except Exception as e:
+        logging.error(f"❌ Failed to save group state: {e}")
 
 def check_if_group_complete(group_number, conn_str, container="index-logs"):
     group_indexes = [cfg["index_name"] for cfg in INDEX_CONFIGS if cfg.get("group") == group_number]
@@ -183,6 +201,18 @@ def check_if_group_complete(group_number, conn_str, container="index-logs"):
         except Exception as e:
             logging.warning(f"⚠️ Could not verify log for index {index_name}: {e}")
             return False
+    
+    # If this is the last group, update group_state.json to mark all complete
+    try:
+        group_state = load_group_state(conn_str, container)
+        current_group = group_state.get("current_group")
+        all_groups = group_state.get("all_groups", [])
+
+        if group_number == all_groups[-1]: # last group
+            save_group_state(current_group, all_groups, conn_str, container, status="All completed")
+            logging.info("🎉 All groups completed. Marked in group_state.json.")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to finalize group_state.json: {e}")
     return True
 
 
@@ -207,6 +237,12 @@ def log_failed_message_to_blob(msg_body: str, reason: str, storage_conn_str: str
 
 def save_index_log(index_name, log_data, connection_string, container="index-logs"):
     try:
+        # Optionally inject group number if missing in log_data
+        if "group" not in log_data:
+            config = next((c for c in INDEX_CONFIGS if c["index_name"] == index_name), None)
+            if config and "group" in config:
+                log_data["group"] = config["group"]
+
         blob_name = f"{index_name}_log.json"
         blob_client = BlobServiceClient.from_connection_string(connection_string).get_blob_client(
             container=container,
