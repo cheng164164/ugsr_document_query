@@ -12,7 +12,7 @@ ENV_VARS = {
 
 # Feature On/Off flags
 feature_flags = {
-    "debug_mode": True,   # Set to True to enable debug prints
+    "debug_mode": False,   # Set to True to enable debug prints
     "custom_ranking": True,   # Set to True to enable custom ranking (vector + keyword); False to use Azure default ranking
     "dynamic_filtering": False,   # Set to True to enable dynamic metadata filtering based on query keywords
     "keywords_matching": False,   # Set to True to enable keyword matching check and warning 

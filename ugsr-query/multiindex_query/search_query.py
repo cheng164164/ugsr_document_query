@@ -1,6 +1,7 @@
 import azure.functions as func
 import logging
 import os
+import concurrent.futures
 import json
 from openai import AzureOpenAI
 import requests
@@ -538,25 +539,10 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
     return  f"**Answer:**\n\n{summary} \n\n\n\n {reference_links}"         
 
 
+
 def multi_index_search_documents(query, rewrited_query, index_names, vector_weight=0.6, top_k=6, 
                                  dynamic_filtering=True, keywords_matching=True, custom_ranking=True, 
-                                 use_previous_context = True, debug=False):
-    """
-    Performs hybrid search across multiple indexes.
-    Args:
-        query (str): The search query.
-        index_names (list): List of Azure Search index names.
-        vector_weight (float): Weight for vector similarity in final ranking [0.0 - 1.0].
-        top_k (int): Number of top documents to return per index.
-        dynamic_filtering (bool): If True, apply dynamic metadata filtering based on query keywords.
-        keywords_matching (bool): If True, check if keywords are present in retrieved documents and warn if missing.
-        custom_ranking (bool): If True, manually calculate final score using vector + keyword; otherwise use Azure's ranking.
-        use_previous_context (bool): If True, rewrite current query using previous queries as context.
-        debug (bool): If True, print debug output
-    Returns:
-        list of documents with relevance scores and index tags.
-    """
-
+                                 use_previous_context=True, debug=False):
     headers = {
         "Content-Type": "application/json",
         "api-key": AZURE_SEARCH_KEY
@@ -566,20 +552,18 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
         "title", "doc_type", "doc_category", "doc_function",
         "terms", "topics", "summary", "content"
     ]
-
     metadata_filter_fields = ["doc_type", "doc_category", "doc_function"]
     vector_field = "content_embedding"
-    
+
     optimized_query = llm_search_query_optimizer(query, rewrited_query, use_previous_context)
     keywords = extract_keywords(query, optimized_query, debug=feature_flags["debug_mode"]) if keywords_matching else None
     query_em = get_query_embedding(optimized_query)
 
     all_results = []
-    all_content = []  # Collect all document content for keyword checking
-    index_debug_data = {} 
+    all_content = []
+    index_debug_data = {}
 
-    for index_name in index_names:
-        """Retrieves relevant documents from Azure AI Search"""
+    def search_index(index_name):
         select_fields = [
             "filename", "title", "doc_type", "doc_category", "doc_function",
             "terms", "topics", "summary", "content", "owner", "url"
@@ -593,37 +577,40 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
             "count": True,
             "top": top_k,
             "select": ",".join(select_fields),
-            "searchFields": ",".join(keyword_fields),    
-            "queryType": "semantic",  
+            "searchFields": ",".join(keyword_fields),
+            "queryType": "semantic",
             "searchMode": "all",
-            "semanticConfiguration": "default-semantic",     
+            "semanticConfiguration": "default-semantic",
             "vectorQueries": [
                 {
                     "kind": "vector",
                     "vector": query_em,
                     "fields": vector_field,
-                    "k": top_k*2,
+                    "k": top_k * 2,
                     "exhaustive": False,
                 }
             ]
         }
 
-        if dynamic_filtering and keywords_matching: 
-            # Apply dynamic metadata filtering
+        if dynamic_filtering and keywords_matching:
             generate_field_based_filter(headers, payload, index_name, keywords, filter_fields=metadata_filter_fields)
             if debug:
                 print(f"⚙️ Applied filter for index {index_name}: {payload.get('filter', 'None')}")
 
         response = requests.post(url, headers=headers, json=payload)
+        index_results = []
+        index_content = []
+        debug_data = []
+
         if response.status_code == 200:
             hits = response.json().get("value", [])
             for doc in hits:
-                keyword_score = doc.get("@search.rerankerScore") or doc.get("@search.score") or 0.0  
+                keyword_score = doc.get("@search.rerankerScore") or doc.get("@search.score") or 0.0
                 if custom_ranking:
                     embedding = doc.get("content_embedding")
                     vector_score = cosine_similarity(query_em, embedding) if embedding else 0.0
-                    norm_keyword_score = keyword_score / 4.0  # Normalize keyword score to 0-1 range
-                    final_score = (1 - vector_weight) * norm_keyword_score + vector_weight * vector_score   
+                    norm_keyword_score = keyword_score / 4.0
+                    final_score = (1 - vector_weight) * norm_keyword_score + vector_weight * vector_score
                     doc["_vector_score"] = vector_score
                     doc["_final_score"] = final_score
                 else:
@@ -633,19 +620,28 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
                 doc["_index"] = index_name
                 doc["_keyword_score"] = keyword_score
                 doc["_azure_score"] = doc.get("@search.score", 0.0)
-                all_results.append(doc)
-                all_content.append(doc.get("content", "").lower() + " " + doc.get("summary", "").lower())
+                index_results.append(doc)
+                index_content.append(doc.get("content", "").lower() + " " + doc.get("summary", "").lower())
 
             sorted_hits = sorted(hits, key=lambda x: x.get("_final_score", 0), reverse=True)
-            if debug:
-                index_debug_data[index_name] = sorted_hits[:3]  # Store top 3
+            debug_data = sorted_hits[:3]
         else:
             logging.warning(f"❌ Search failed on {index_name}: {response.status_code} — {response.text}")
-    
+
+        return index_results, index_content, index_name, debug_data
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(search_index, index) for index in index_names]
+        for future in concurrent.futures.as_completed(futures):
+            index_results, index_content, index_name, debug_data = future.result()
+            all_results.extend(index_results)
+            all_content.extend(index_content)
+            if debug:
+                index_debug_data[index_name] = debug_data
+
     if not all_results:
         return []
 
-    # Compute average top-3 final scores per index
     scores_by_index = {}
     for index in index_names:
         top_docs = sorted([d for d in all_results if d["_index"] == index], key=lambda d: d["_final_score"], reverse=True)[:3]
@@ -661,7 +657,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
         for name, score in sorted_indexes:
             print(f"  - {name}: {score:.4f}")
         print(f"✅ Best index selected: {best_index} (score: {best_score:.4f})\n")
-        
+
         print("\n🔎 Top 3 chunks from each index:")
         for index, docs in index_debug_data.items():
             print(f"\nIndex: {index}")
@@ -673,21 +669,18 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
                     (f"Vector: {doc.get('_vector_score', 0):.4f}, " if custom_ranking else "") +
                     f"Azure: {doc.get('_azure_score', 0):.4f}, " +
                     f"Title: {doc.get('title', 'N/A')}\n     Snippet: {snippet}..."
-                )   
-    # Return top_k results from best index
+                )
+
     final_results = [doc for doc in all_results if doc["_index"] == best_index]
-    final_results = sorted(final_results, key=lambda d: d["_final_score"], reverse=True)[:8]  # Return top 8 as final answer
+    final_results = sorted(final_results, key=lambda d: d["_final_score"], reverse=True)[:8]
 
     warning_msg = ""
     if keywords_matching:
-        # --- Check for missing keywords ---
         combined_text = " ".join(all_content)
         missing_keywords = [kw for kw in keywords if kw not in combined_text]
-
         if missing_keywords:
             warning_msg = f"Keyword search indicates the following words are not found in any relevant documents: '{'; '.join(missing_keywords)}'. You can ignore this message or consider rephrasing your question."
-        
-    # Final results with warning if needed
+
     final_answer = warning_msg, final_results
     return final_answer
 
