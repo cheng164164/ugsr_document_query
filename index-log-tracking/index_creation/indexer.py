@@ -208,7 +208,7 @@ def document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, file
         df = pd.read_csv(sas_url)
         return df.to_string(index=False)
 
-    elif file_extension in [".xls"]:
+    elif file_extension in [".xls", ".xlsx"]:
         df = pd.read_excel(sas_url)
         return df.to_string(index=False)
 
@@ -539,4 +539,10 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
 
     print(f" 🎉 Finished uploading [Index: {index_name}] batch {batch_number + 1} ({len(indexed_docs)} chunks)")
 
-    return metadata_df
+    results = {
+                "metadata_df": metadata_df,
+                "uploaded_chunks": len(indexed_docs),
+                "deleted_chunks": 0,
+                "skipped_files": 0,
+              }
+    return results

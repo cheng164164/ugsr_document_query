@@ -2,11 +2,11 @@ import os
 import base64
 import logging
 import json
+import time
 from math import ceil
 import azure.functions as func
-from index_creation.config import ENV_VARS, INDEX_CONFIGS, SCHEMA_MAPPING_DICT
+from index_creation.config import ENV_VARS, INDEX_CONFIGS, SCHEMA_MAPPING_DICT, enable_grouping, enable_delta_updates
 from index_creation.util import set_env_vars, clean_metadata
-from index_creation.indexer import *
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
 from openai import AzureOpenAI
@@ -17,8 +17,12 @@ from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
 
 
 logging.info("🔄 indexer_queue_trigger module loaded.")
-
 set_env_vars(ENV_VARS)
+
+if enable_delta_updates:
+    from index_creation.indexer_delta import *
+else:
+    from index_creation.indexer import *
 
 connection_string = os.getenv('AZURE_BLOB_CONN_STRING')
 azure_doc_intell_endpoint = os.getenv('AZURE_DOC_INTELL_ENDPOINT')
@@ -53,8 +57,36 @@ def main(msg: func.QueueMessage) -> None:
 
         if action == "init_index":
             delete_existing_log_blob(index_name, connection_string)
-            create_index(index_name, search_key, search_endpoint)
-            save_index_log(index_name, {"index_name": index_name, "group": config.get("group"), "batches": [], "total_batches": payload.get("total_batches")}, connection_string)
+            # Re-create the index if it already exists
+            try:
+                create_index(index_name, search_key, search_endpoint)
+                logging.info(f"✅ Index created: {index_name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Index creation error (may already exist): {e}")
+
+            # Wait for index to be ready
+            from azure.core.exceptions import HttpResponseError
+            from azure.search.documents.indexes import SearchIndexClient
+            wait_client = SearchIndexClient(endpoint=search_endpoint, credential=AzureKeyCredential(search_key))
+
+            for _ in range(10):
+                try:
+                    wait_client.get_index(index_name)
+                    break
+                except HttpResponseError as e:
+                    logging.info("⏳ Waiting for index to be available...")
+                    time.sleep(2)
+            else:
+                logging.error(f"❌ Timeout waiting for index {index_name} to be ready.")
+                return
+
+            save_index_log(index_name, {
+            "index_name": index_name,
+            "group": config.get("group"),
+            "batches": [],
+            "total_batches": payload.get("total_batches")
+            }, connection_string)
+
             logging.info(f"✅ Initialized index and log for: {index_name}")
             return
 
@@ -68,12 +100,15 @@ def main(msg: func.QueueMessage) -> None:
                 return
 
             log = load_index_log(index_name, connection_string)
-            run_index_job(config, log, batch_number, batch_size, total_batches)
-            logging.info(f"✅ Finished batch {batch_number} for index: {index_name}")
+            already_uploaded = batch_number in {b["batch_number"] for b in log.get("batches", []) if b["status"] == "uploaded"}
+            if not already_uploaded:
+                run_index_job(config, log, batch_number, batch_size, total_batches)
+                logging.info(f"✅ Finished batch {batch_number} for index: {index_name}")
+            else:
+                logging.info(f"⏩ Skipping already uploaded batch {batch_number}")
 
             if enable_grouping:
                 group_num = config.get("group")
-
                 if check_if_group_complete(group_num, connection_string):
                     group_state = load_group_state(connection_string)
                     if group_state["current_group"] == group_num:
@@ -85,10 +120,18 @@ def main(msg: func.QueueMessage) -> None:
                             queue_client = QueueClient.from_connection_string(os.getenv("AzureWebJobsStorage"), "indexing-requests")
 
                             for next_config in [c for c in INDEX_CONFIGS if c["group"] == next_group]:
+                                logging.info(f"📨 Enqueueing index init for group {next_group}: {next_config['index_name']}")
                                 enqueue_init_and_batches(next_config, queue_client, connection_string, enable_grouping=True, batch_size=batch_size)
 
                             save_group_state(next_group, all_groups, connection_string)
+                            logging.info(f"✅ Moved to next group: {next_group}")
                             logging.info(f"📦 Queued group {next_group}")
+
+                        elif enable_delta_updates:
+                            logging.info("🧼 Triggering cleanup after final group")
+                            search_client = SearchClient(endpoint=search_endpoint, index_name=index_name, credential=AzureKeyCredential(search_key))
+                            clean_file_level_deletes_after_batch(connection_string, config['document_container'], search_client)
+
         else:
             logging.warning(f"⚠️ Unknown action: {action}")
 
@@ -125,15 +168,25 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
         logging.info(f"⏩ Skipping already uploaded batch {batch_number}")
         return
 
-    metadata_df = data_chunk_embed_upload_batch(
+    result = data_chunk_embed_upload_batch(
         splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
         config['metadata_container'], config['metadata_blob'], config['index_name'],
         azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, azure_openai_api_version,
         azure_oai_deployment_model, using_embedder=True, batch_number=batch_number,
         batch_size=batch_size, total_batches=total_batches, blob_subset=blobs_to_process
     )
-
-    update_batch_log(config["index_name"], batch_number, "uploaded", connection_string)
+    metadata_df = result["metadata_df"]
+    update_batch_log(config["index_name"],
+                     batch_number,
+                     status="uploaded",
+                     connection_string=connection_string,
+                     error=None,  # optional                     
+                     container="index-logs",
+                     extra_fields={"uploaded_chunks": result["uploaded_chunks"],
+                                   "deleted_chunks": result["deleted_chunks"],
+                                   "skipped_files": result["skipped_files"]
+                                  }
+                    )
 
 def enqueue_init_and_batches(config, queue_client, conn_str, enable_grouping=True, batch_size=100):
     index_name = config["index_name"]
@@ -286,7 +339,7 @@ def load_index_log(index_name, connection_string, container="index-logs"):
         return {"index_name": index_name, "batches": []}
     
 
-def update_batch_log(index_name, batch_number, status, connection_string, error=None, container="index-logs"):
+def update_batch_log(index_name, batch_number, status, connection_string, error=None, container="index-logs", extra_fields=None):
     """
     Safely updates the index log to include or overwrite the given batch entry.
     """
@@ -301,6 +354,8 @@ def update_batch_log(index_name, batch_number, status, connection_string, error=
         entry = {"batch_number": batch_number, "status": status}
         if error:
             entry["error"] = error
+        if extra_fields:
+            entry.update(extra_fields)
         log["batches"].append(entry)
 
         # Save updated log

@@ -2,6 +2,10 @@
 # Add more index configs as needed
 import os
 
+# Global control flags
+enable_grouping = os.getenv("ENABLE_GROUPING", "true").lower() == "true"
+enable_delta_updates = os.getenv("ENABLE_DELTA_UPDATES", "true").lower() == "true"
+
 ENV_VARS = {
     "AZURE_BLOB_CONN_STRING": "<your blob connect string>",
     "AZURE_DOC_INTELL_ENDPOINT": "<your_doc_intell_endpoint>",
@@ -19,7 +23,7 @@ ENV_VARS = {
 
 
 ########################################################################################
-'''
+
 #### Chatbot "Kimmi"
 INDEX_CONFIGS = [
     {
@@ -107,16 +111,16 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     },    
 }
-'''
+
 
 
 
 ###############################################################################
-
+'''
 #### Chatbot "Andy"
 INDEX_CONFIGS = [
     {
-        "index_name": "dev_hub_index",
+        "index_name": "dev_hub_index_v2",
         "metadata_container": "development-hub-documents-metadata",
         "metadata_blob": "auto_extraction/development_hub_metadata_new.csv",
         "document_container": "development-hub-documents",
@@ -126,7 +130,7 @@ INDEX_CONFIGS = [
 
 SCHEMA_MAPPING_DICT = {
     ### Mapping of standard schema -> metadata columns
-    "dev_hub_index": {
+    "dev_hub_index_v2": {
         "Name": "Name",
         "Title": None,
         "Doc Type": None,
@@ -136,3 +140,4 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     } 
 }
+'''

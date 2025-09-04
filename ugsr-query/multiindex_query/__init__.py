@@ -31,16 +31,19 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         query = req_body.get("query")
         query_history = req_body.get("queryhistory", "")
         answer_history = req_body.get("answerhistory", "")
-        if not query:
-            return func.HttpResponse("Error: Missing 'query' parameter", status_code=400)
+        if not query or query.strip() == "":
+            return func.HttpResponse(json.dumps({
+                        "answer": "Hi! It looks like you've returned after a break. Please re-enter your question so I can assist you."
+                        }), mimetype="application/json", status_code=200)
 
         cleaned_query = clean_query_for_llm(query)  # Clean query by removing routing keywords if there are any
         cleaned_query_history = clean_query_for_llm(query_history)
 
-        history_context = filter_relevant_history(cleaned_query, cleaned_query_history, answer_history)
-        if use_prev_context:
+        if use_prev_context and cleaned_query_history.strip() and answer_history.strip():
+            history_context = filter_relevant_history(cleaned_query, cleaned_query_history, answer_history)
             rewrited_query = rewrite_query_with_history(cleaned_query, history_context)
         else:
+            history_context = ""
             rewrited_query = cleaned_query
 
         if metadata_search:

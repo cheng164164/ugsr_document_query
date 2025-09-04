@@ -55,7 +55,7 @@ share_point_urls = {
 
 
 
-### Chatbot Andy
+### Chatbot Andi
 index_names = ["dev_hub_index"
               ]
 

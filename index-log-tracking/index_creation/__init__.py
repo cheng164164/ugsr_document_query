@@ -8,9 +8,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
 from azure.storage.blob import ContainerClient
 from openai import AzureOpenAI
-from .config import INDEX_CONFIGS, ENV_VARS, SCHEMA_MAPPING_DICT
+from .config import INDEX_CONFIGS, ENV_VARS, SCHEMA_MAPPING_DICT, enable_delta_updates, enable_grouping
 from .util import set_env_vars, clean_metadata
-from .indexer import *
 from azure.storage.queue import QueueClient
 from math import ceil
 
@@ -18,7 +17,11 @@ set_env_vars(ENV_VARS)
 logging.basicConfig(level=logging.INFO)
 logging.info("🔁 index_creation HTTP trigger module loaded.")
 
-enable_grouping = True
+if enable_delta_updates:
+    from index_creation.indexer_delta import *
+else:
+    from index_creation.indexer import *
+
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("🚀 HTTP trigger function started.")
@@ -29,7 +32,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         queue_name = os.getenv("QUEUE_NAME")
         queue_client = QueueClient.from_connection_string(conn_str, queue_name)
 
-        batch_size = 20  # adjust as needed
+        batch_size = 30  # adjust as needed
 
         if enable_grouping:
             logging.info("🧩 Group-by-group mode is ENABLED.")
@@ -45,11 +48,21 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             for config in [cfg for cfg in INDEX_CONFIGS if cfg["group"] == first_group]:
                 enqueue_init_and_batches(config, queue_client, connection_string, batch_size)
 
+            # If only one group, trigger cleanup directly
+            if len(all_groups) == 1 and enable_delta_updates:
+                logging.info("🧼 Triggering cleanup after single-group indexing.")
+                trigger_cleanup(config)
+
 
         else:
             logging.info("📦 Group-by-group mode is DISABLED. Enqueueing all libraries.")
             for config in INDEX_CONFIGS:
                 enqueue_init_and_batches(config, queue_client, connection_string, batch_size)
+
+            # Trigger cleanup for entire index if no grouping
+            if enable_delta_updates:
+                for config in INDEX_CONFIGS:
+                    trigger_cleanup(config)
 
         logging.info("✅ Indexing messages enqueued successfully.")
         return func.HttpResponse("Message(s) enqueued.", status_code=202)
@@ -101,3 +114,22 @@ def save_group_state(current_group, all_groups, conn_str, container="index-logs"
         logging.info("📄 Saved group_state.json to blob storage.")
     except Exception as e:
         logging.error(f"❌ Failed to save group state: {e}")
+
+
+def trigger_cleanup(config):
+    try:
+        from .indexer_delta import clean_file_level_deletes_after_batch
+        index_name = config["index_name"]
+        container = config["document_container"]
+        search_client = SearchClient(
+            endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+            index_name=index_name,
+            credential=AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY"))
+        )
+        clean_file_level_deletes_after_batch(
+            connection_string=os.getenv("AZURE_BLOB_CONN_STRING"),
+            container_name=container,
+            search_client=search_client
+        )
+    except Exception as e:
+        logging.error(f"❌ Failed to trigger cleanup: {e}")

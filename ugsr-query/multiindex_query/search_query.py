@@ -65,56 +65,60 @@ def filter_relevant_history(current_query, query_history, answer_history):
     if not current_query.strip():
         return ""
 
-    queries = [q.strip() for q in query_history.split("|") if q.strip()]
-    answers = [a.strip() for a in answer_history.split("|") if a.strip()]
+    try:
+        queries = [q.strip() for q in query_history.split("|") if q.strip()]
+        answers = [a.strip() for a in answer_history.split("|") if a.strip()]
 
-    history_turns = []
-    max_len = max(len(queries), len(answers))
+        history_turns = []
+        max_len = max(len(queries), len(answers))
 
-    for i in range(max_len):
-        user = queries[i] if i < len(queries) else None
-        bot = answers[i] if i < len(answers) else None
-        turn_number = i+1
-        turn_lines = [f"Turn {turn_number}:"]
-        if user and bot:
-            turn_lines.append(f"User: {user}\nBot: {bot}")
-        elif user:
-            turn_lines.append(f"User: {user}")
-        elif bot:
-            turn_lines.append(f"Bot: {bot}")
+        for i in range(max_len):
+            user = queries[i] if i < len(queries) else None
+            bot = answers[i] if i < len(answers) else None
+            turn_number = i+1
+            turn_lines = [f"Turn {turn_number}:"]
+            if user and bot:
+                turn_lines.append(f"User: {user}\nBot: {bot}")
+            elif user:
+                turn_lines.append(f"User: {user}")
+            elif bot:
+                turn_lines.append(f"Bot: {bot}")
 
-        history_turns.append("\n".join(turn_lines))
+            history_turns.append("\n".join(turn_lines))
 
-    if not history_turns:
+        if not history_turns:
+            return ""
+
+        client = AzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version="2024-12-01-preview"
+        )
+
+        transcript = "\n\n".join(history_turns)
+
+        prompt = (
+            "You are an assistant that filters past chat history to keep only what is useful for understanding the current question.\n"
+            "Each turn may include a user question, a bot answer, or both.\n"
+            "Your task is to return only the relevant items from the history that help clarify or add context to the current question.\n"
+            "Ignore unrelated entries.\n\n"
+            "If the CURRENT QUESTION appears vague (e.g., contains 'it' or 'that'), lacking of context and reference. In this case, "
+            "prioritize the most recent turns (e.g., Turn 5 is newer than Turn 1) that might clarify those references, and ignore older, unrelated entries.\n"
+            f"CURRENT QUESTION:\n{current_query}\n\n"
+            f"PAST HISTORY:\n{transcript}"
+        )
+
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to filter relevant history: {e}")
         return ""
-
-    client = AzureOpenAI(
-        azure_endpoint=AZURE_OPENAI_ENDPOINT,
-        api_key=AZURE_OPENAI_API_KEY,
-        api_version="2024-12-01-preview"
-    )
-
-    transcript = "\n\n".join(history_turns)
-
-    prompt = (
-        "You are an assistant that filters past chat history to keep only what is useful for understanding the current question.\n"
-        "Each turn may include a user question, a bot answer, or both.\n"
-        "Your task is to return only the relevant items from the history that help clarify or add context to the current question.\n"
-        "Ignore unrelated entries.\n\n"
-        "If the CURRENT QUESTION appears vague (e.g., contains 'it' or 'that'), lacking of context and reference. In this case, "
-        "prioritize the most recent turns (e.g., Turn 5 is newer than Turn 1) that might clarify those references, and ignore older, unrelated entries.\n"
-        f"CURRENT QUESTION:\n{current_query}\n\n"
-        f"PAST HISTORY:\n{transcript}"
-    )
-
-    response = client.chat.completions.create(
-        model=AZURE_OPENAI_DEPLOYMENT,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return response.choices[0].message.content.strip()
-
-
+    
 def rewrite_query_with_history(current_query, relevant_history_text):
     """
     Rewrites the current query using relevant chat history for clarity.
@@ -151,15 +155,20 @@ def rewrite_query_with_history(current_query, relevant_history_text):
         f"CURRENT QUESTION:\n{current_query}"
     )
 
-    response = client.chat.completions.create(
-        model=AZURE_OPENAI_DEPLOYMENT,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    )
+    try:
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
 
-    return response.choices[0].message.content.strip()
+        return response.choices[0].message.content.strip()
+    
+    except Exception as e:
+        logging.warning(f"Query rewrite failed: {e}")
+        return current_query
 
 
 def llm_search_query_optimizer(query, rewrited_query, use_previous_context):
@@ -668,7 +677,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
                     f"Keyword: {doc.get('_keyword_score', 0):.4f}, " +
                     (f"Vector: {doc.get('_vector_score', 0):.4f}, " if custom_ranking else "") +
                     f"Azure: {doc.get('_azure_score', 0):.4f}, " +
-                    f"Title: {doc.get('title', 'N/A')}\n     Snippet: {snippet}..."
+                    f"Title: {doc.get('filename', 'N/A')}\n     Snippet: {snippet}..."
                 )
 
     final_results = [doc for doc in all_results if doc["_index"] == best_index]
@@ -744,10 +753,11 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
 
             # Determine which document has the most votes
             most_common_doc = max(file_votes.values(), key=lambda x: x['count'])['chunk']
+            url_value = (most_common_doc.get("url") or "").split(";")[0].strip()
             main_answer += (
                 "\n\n---\n Please refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
                 "**Document**:"
-                f"  [{title_case_filename(most_common_doc.get('filename', 'N/A'))}]({most_common_doc.get('url', 'N/A')})\n\n"
+                f"  [{title_case_filename(most_common_doc.get('filename', 'N/A'))}]({url_value})\n\n"
                 f"**Key Contact**: {title_case_name(most_common_doc.get('owner', 'N/A'))}"
             )
         
@@ -788,11 +798,12 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
 
     for doc in list(doc_groups.values())[:3]:
         document_name = title_case_filename(doc['document_name'])
+        url_value = (doc.get("url") or "").split(";")[0].strip()
         key_contact = title_case_name(doc['key_contact']) 
         if hide_ref_relevance:
             reference_text += (
                 f"\n---\n"
-                f"**Document**: [{document_name}]({doc['url']})\n\n"
+                f"**Document**: [{document_name}]({url_value})\n\n"
                 f"**Key Contact**: {key_contact}\n\n"
             )
             continue
@@ -831,7 +842,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
 
         reference_text += (
                 f"\n---\n"
-                f"**Document**: [{document_name}]({doc['url']})\n\n"
+                f"**Document**: [{document_name}]({url_value})\n\n"
                 f"**Key Contact**: {key_contact}\n\n"
                 # f" **Similarity Score**: {avg_score}\n\n"
                 f"**Relevance**: {relevance_summary}\n\n"
