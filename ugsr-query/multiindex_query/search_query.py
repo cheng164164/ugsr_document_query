@@ -32,29 +32,33 @@ def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "conte
     Argument:  raw_query  -  can be single query or query history (sperated by '|')
     """
     try:
-        # Normalize and split query into clauses using punctuation
+        if not raw_query or not isinstance(raw_query, str):
+            return ""
+
+        # Normalize and split query into clauses using punctuation or pipes
         parts = re.split(r'[,.!?;|\n]+', raw_query)
         cleaned = []
 
         for part in parts:
             stripped = part.strip()
-            # If this part is exactly one of the routing keywords, skip it
+            if not stripped:
+                continue
+            # Skip if it's exactly or only routing keywords
             if stripped.lower() in route_keywords:
                 continue
-            # If it's empty or only a keyword, skip
-            if not stripped or all(w.lower() in route_keywords for w in stripped.split()):
+            if all(w.lower() in route_keywords for w in stripped.split()):
                 continue
             cleaned.append(stripped)
 
-        if '|' in raw_query:   # If input is query history (sperated by '|')
+        # Recombine
+        if '|' in raw_query:
             return '| '.join(cleaned).strip()
-        
-        else:   #  If inout is single query
+        else:
             return '. '.join(cleaned).strip()
-    
+
     except Exception as e:
         logging.error(f"Error cleaning query: {e}")
-        return raw_query
+        return raw_query if raw_query else ""
 
 
 def filter_relevant_history(current_query, query_history, answer_history):
