@@ -16,6 +16,7 @@ from .search_query import *
 
 
 debug_mode = feature_flags["debug_mode"]
+parallel_queries = feature_flags["parallel_queries"]
 keywords_matching = feature_flags["keywords_matching"]
 custom_ranking = feature_flags["custom_ranking"]
 dynamic_filtering = feature_flags["dynamic_filtering"]
@@ -57,8 +58,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         docs = multi_index_search_documents(cleaned_query, rewrited_query, index_names, vector_weight=0.6, top_k=8, 
                                                             dynamic_filtering=dynamic_filtering, 
                                                             keywords_matching = keywords_matching,
+                                                            custom_ranking=custom_ranking,
                                                             use_previous_context = use_prev_context,    
-                                                            custom_ranking=custom_ranking, 
+                                                            parallel=parallel_queries, 
                                                             debug=debug_mode)
         if not docs:
             return func.HttpResponse("No relevant documents found.", status_code=404)

@@ -8,7 +8,9 @@ from typing import Dict, List, Tuple, Iterable, Set
 import traceback
 import pandas as pd
 import requests
+import logging
 from dotenv import load_dotenv
+from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions, BlobClient, ContainerClient
 from openpyxl import load_workbook
 from datetime import datetime, timedelta
@@ -71,9 +73,17 @@ def read_metadata_from_blob(connection_string, container_name, blob_name):
 
 
 def create_index(index_name: str, search_key: str, search_endpoint: str) -> None:
-    """Create or update an Azure AI Search index without deleting it if it already exists. Adds delta-friendly fields."""
+    """Only create the index if it doesn't already exist. Delta-mode safe."""
     credential = AzureKeyCredential(search_key)
     index_client = SearchIndexClient(endpoint=search_endpoint, credential=credential)
+
+    # Check if the index already exists
+    try:
+        index_client.get_index(index_name)
+        logging.info(f"ℹ️ Index '{index_name}' already exists. Skipping creation (delta mode).")
+        return
+    except ResourceNotFoundError:
+        logging.info(f"🆕 Index '{index_name}' does not exist. Proceeding to create it.")
 
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True, sortable=True, filterable=True, facetable=True),
@@ -121,8 +131,8 @@ def create_index(index_name: str, search_key: str, search_endpoint: str) -> None
     semantic_search = SemanticSearch(default_configuration_name="default-semantic", configurations=[semantic_configuration])
 
     index = SearchIndex(name=index_name, fields=fields, semantic_search=semantic_search, vector_search=vector_search)
-    index_client.create_or_update_index(index)
-
+    index_client.create_index(index)
+    
 
 def create_search_index_from_schema(index_name: str, fields: list, vector_config: dict = None, semantic_config: dict = None) -> None:
     """Create or update an Azure AI Search index with REST API using a provided schema JSON."""
@@ -488,7 +498,16 @@ def data_chunk_embed_upload_batch(
 
     if not current_batch:
         print(f"No files found in batch {batch_number}")
-        return metadata_df
+        return  {
+                "metadata_df": metadata_df,
+                "uploaded_chunks": 0,
+                "deleted_chunks": 0,
+                "skipped_files": 0,
+                "added_files": 0,
+                "deleted_files": 0,
+                "modified_files": 0,
+                "failed_files": 0
+                }
 
     print(f"\n📦 [Index: {index_name}] Starting batch {batch_number + 1}: processing files {start + 1} to {end} of {total_files}")
 
@@ -500,6 +519,10 @@ def data_chunk_embed_upload_batch(
     upserts_by_file = {}
     failed_files = []
     current_filenames: Set[str] = set()
+
+    added_files = set()
+    deleted_files = set()
+    modified_files = set()
 
     for i, blob in enumerate(current_batch):
         print(f"📄 [Index: {index_name} ({total_files} files)] [Batch {batch_number + 1}/{total_batches}] [{start + i + 1}/{total_files}] Processing: {blob.name}")
@@ -524,6 +547,14 @@ def data_chunk_embed_upload_batch(
                 search_client=search_client,
                 using_embedder=using_embedder,
             )
+
+            # Log changes per file
+            if new_docs and not to_delete:
+                added_files.add(blob.name)
+            elif to_delete and not new_docs:
+                deleted_files.add(blob.name)
+            elif new_docs and to_delete:
+                modified_files.add(blob.name)
 
             upserts_by_file[blob.name] = len(new_docs)
             upserts.extend(new_docs)
@@ -553,6 +584,10 @@ def data_chunk_embed_upload_batch(
     "uploaded_chunks": len(upserts),
     "deleted_chunks": len(deletes),
     "skipped_files": len(current_batch) - (len(upserts_by_file) + len(failed_files)),
+    "added_files": len(added_files),
+    "deleted_files": len(deleted_files),
+    "modified_files": len(modified_files),
+    "failed_files": len(failed_files),
     }
 
     return results

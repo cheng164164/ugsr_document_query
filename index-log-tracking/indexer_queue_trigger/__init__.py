@@ -58,28 +58,7 @@ def main(msg: func.QueueMessage) -> None:
         if action == "init_index":
             delete_existing_log_blob(index_name, connection_string)
             # Re-create the index if it already exists
-            try:
-                create_index(index_name, search_key, search_endpoint)
-                logging.info(f"✅ Index created: {index_name}")
-            except Exception as e:
-                logging.warning(f"⚠️ Index creation error (may already exist): {e}")
-
-            # Wait for index to be ready
-            from azure.core.exceptions import HttpResponseError
-            from azure.search.documents.indexes import SearchIndexClient
-            wait_client = SearchIndexClient(endpoint=search_endpoint, credential=AzureKeyCredential(search_key))
-
-            for _ in range(10):
-                try:
-                    wait_client.get_index(index_name)
-                    break
-                except HttpResponseError as e:
-                    logging.info("⏳ Waiting for index to be available...")
-                    time.sleep(2)
-            else:
-                logging.error(f"❌ Timeout waiting for index {index_name} to be ready.")
-                return
-
+            create_index(index_name, search_key, search_endpoint)
             save_index_log(index_name, {
             "index_name": index_name,
             "group": config.get("group"),
@@ -100,12 +79,49 @@ def main(msg: func.QueueMessage) -> None:
                 return
 
             log = load_index_log(index_name, connection_string)
-            already_uploaded = batch_number in {b["batch_number"] for b in log.get("batches", []) if b["status"] == "uploaded"}
-            if not already_uploaded:
-                run_index_job(config, log, batch_number, batch_size, total_batches)
-                logging.info(f"✅ Finished batch {batch_number} for index: {index_name}")
+
+            # Find batch entry in the log
+            batch_entry = next((b for b in log.get("batches", []) if b["batch_number"] == batch_number), None)
+            should_run_batch = False
+
+            if batch_entry is None:
+                logging.info(f"ℹ️ No log entry found for batch {batch_number} — treating as new. Will run.")
+                should_run_batch = True
+            elif batch_entry["status"] == "uploaded":
+                logging.info(f"⏩ Skipping already uploaded batch {batch_number} for index: {index_name}")
+            elif batch_entry["status"] in {"failed", "pending"}:
+                logging.info(f"🔁 Retrying previously failed/pending batch {batch_number} for index: {index_name}")
+                should_run_batch = True
             else:
-                logging.info(f"⏩ Skipping already uploaded batch {batch_number}")
+                logging.warning(f"⚠️ Unrecognized batch status '{batch_entry['status']}' — will retry as safety.")
+                should_run_batch = True
+
+            if should_run_batch:
+                try:
+                    run_index_job(config, log, batch_number, batch_size, total_batches)
+                    logging.info(f"✅ Finished batch {batch_number} for index: {index_name}")
+
+                except Exception as e:
+                    logging.exception(f"❌ Error running batch {batch_number} for index: {index_name}")
+
+                    # 🔴 Mark as failed
+                    update_batch_log(
+                        index_name=index_name,
+                        batch_number=batch_number,
+                        status="failed",
+                        connection_string=connection_string,
+                        container="index-logs",
+                        extra_fields={"error": str(e)}
+                    )
+
+                    # Optionally log to blob
+                    log_failed_message_to_blob(
+                        msg_body=json.dumps(payload),
+                        reason=str(e),
+                        storage_conn_str=connection_string,
+                        container="failed-index-jobs",
+                        blob_prefix="failed-index-jobs"
+                    )
 
             if enable_grouping:
                 group_num = config.get("group")
@@ -164,30 +180,73 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
     end = min(start + batch_size, len(blob_list))
     blobs_to_process = blob_list[start:end]
 
-    if batch_number in {b["batch_number"] for b in log.get("batches", []) if b["status"] == "uploaded"}:
-        logging.info(f"⏩ Skipping already uploaded batch {batch_number}")
-        return
-
-    result = data_chunk_embed_upload_batch(
-        splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
-        config['metadata_container'], config['metadata_blob'], config['index_name'],
-        azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, azure_openai_api_version,
-        azure_oai_deployment_model, using_embedder=True, batch_number=batch_number,
-        batch_size=batch_size, total_batches=total_batches, blob_subset=blobs_to_process
+    # 🟡 Step 1: Mark this batch as pending
+    update_batch_log(
+        config["index_name"],
+        batch_number,
+        status="pending",
+        connection_string=connection_string,
+        container="index-logs",
+        extra_fields={}
     )
-    metadata_df = result["metadata_df"]
-    update_batch_log(config["index_name"],
-                     batch_number,
-                     status="uploaded",
-                     connection_string=connection_string,
-                     error=None,  # optional                     
-                     container="index-logs",
-                     extra_fields={"uploaded_chunks": result["uploaded_chunks"],
-                                   "deleted_chunks": result["deleted_chunks"],
-                                   "skipped_files": result["skipped_files"]
-                                  }
-                    )
 
+    try:
+        # ⚙️ Step 2: Run the actual indexing process
+        result = data_chunk_embed_upload_batch(
+            splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
+            config['metadata_container'], config['metadata_blob'], config['index_name'],
+            azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, azure_openai_api_version,
+            azure_oai_deployment_model, using_embedder=True, batch_number=batch_number,
+            batch_size=batch_size, total_batches=total_batches, blob_subset=blobs_to_process
+        )
+        metadata_df = result["metadata_df"]
+
+        # ✅ Step 3: Mark batch as uploaded (success)
+        update_batch_log(
+            config["index_name"],
+            batch_number,
+            status="uploaded",
+            connection_string=connection_string,
+            container="index-logs",
+            extra_fields={
+                "uploaded_chunks": result.get("uploaded_chunks", 0),
+                "deleted_chunks": result.get("deleted_chunks", 0),
+                "skipped_files": result.get("skipped_files", 0),
+                "added_files": result.get("added_files", 0),
+                "deleted_files": result.get("deleted_files", 0),
+                "modified_files": result.get("modified_files", 0),
+                "failed_files": result.get("failed_files", 0),
+            }
+        )
+
+    except Exception as e:
+        logging.exception(f"❌ Failed to process batch {batch_number} for index: {config['index_name']}")
+        
+        # 🔴 Step 4: Mark batch as failed
+        update_batch_log(
+            config["index_name"],
+            batch_number,
+            status="failed",
+            connection_string=connection_string,
+            container="index-logs",
+            extra_fields={"error": str(e)}
+        )
+
+        # Optionally log the failed message for recovery
+        log_failed_message_to_blob(
+            json.dumps({
+                "index_name": config["index_name"],
+                "batch_number": batch_number,
+                "batch_size": batch_size,
+                "total_batches": total_batches
+            }),
+            reason=str(e),
+            storage_conn_str=connection_string,
+            container="failed-index-jobs",
+            blob_prefix="failed-index-jobs"
+        )
+
+        
 def enqueue_init_and_batches(config, queue_client, conn_str, enable_grouping=True, batch_size=100):
     index_name = config["index_name"]
     container_client = ContainerClient.from_connection_string(conn_str, config['document_container'])
@@ -200,7 +259,24 @@ def enqueue_init_and_batches(config, queue_client, conn_str, enable_grouping=Tru
         "enable_grouping": enable_grouping,
         "total_batches": total_batches
     })
+
     queue_client.send_message(base64.b64encode(init_msg.encode("utf-8")).decode("utf-8"))
+    logging.info(f"📨 Sent init_index message for index: {index_name}")
+
+    # Pre-log all batches as pending
+    for batch_number in range(total_batches):
+        update_batch_log(
+            index_name=index_name,
+            batch_number=batch_number,
+            status="pending",
+            connection_string=conn_str,
+            container="index-logs",
+            extra_fields={"pre_logged": True}
+        )
+        
+    # Wait until index is available (polling instead of fixed sleep)
+    wait_for_index_ready(index_name)
+
     for batch_number in range(total_batches):
         msg = json.dumps({
             "action": "start_indexing",
@@ -210,7 +286,7 @@ def enqueue_init_and_batches(config, queue_client, conn_str, enable_grouping=Tru
             "total_batches": total_batches,
             "enable_grouping": enable_grouping
         })
-        queue_client.send_message(base64.b64encode(msg.encode("utf-8")).decode("utf-8"), visibility_timeout=10)
+        queue_client.send_message(base64.b64encode(msg.encode("utf-8")).decode("utf-8"), visibility_timeout=40)
 
 def load_group_state(conn_str, container="index-logs"):
     blob = BlobServiceClient.from_connection_string(conn_str).get_blob_client(container, "group_state.json")
@@ -344,24 +420,57 @@ def update_batch_log(index_name, batch_number, status, connection_string, error=
     Safely updates the index log to include or overwrite the given batch entry.
     """
     try:
-        # Load the latest log
         log = load_index_log(index_name, connection_string, container=container)
 
-        # Remove any existing entry for the batch
-        log["batches"] = [b for b in log.get("batches", []) if b["batch_number"] != batch_number]
+        # Safely get previous entry
+        existing_entry = next((b for b in log.get("batches", []) if b["batch_number"] == batch_number), None)
+        retry_count = 0
+        if existing_entry:
+            if status == "failed":
+                retry_count = existing_entry.get("retry_count", 0) + 1
+            else:
+                retry_count = existing_entry.get("retry_count", 0)
 
-        # Add the updated entry
-        entry = {"batch_number": batch_number, "status": status}
+        # Build log entry
+        entry = {
+            "batch_number": batch_number,
+            "status": status,
+            "retry_count": retry_count
+        }
         if error:
             entry["error"] = error
         if extra_fields:
             entry.update(extra_fields)
-        log["batches"].append(entry)
 
-        # Save updated log
+        # ✅ Merge-safe update
+        existing_batches = {b["batch_number"]: b for b in log.get("batches", [])}
+        existing_batches[batch_number] = entry  # overwrite or insert
+        log["batches"] = list(existing_batches.values())
+
+        # Save back to blob
         save_index_log(index_name, log, connection_string, container=container)
-        logging.info(f"📝 Updated log for batch {batch_number} in index '{index_name}'")
+        logging.info(f"📝 Safely updated log for batch {batch_number} in index '{index_name}'")
 
     except Exception as e:
         logging.error(f"❌ Failed to update batch log for index '{index_name}': {e}")
     
+    
+def wait_for_index_ready(index_name, search_endpoint=None, search_key=None, max_retries=30, delay_seconds=2):
+    if not search_endpoint:
+        search_endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
+    if not search_key:
+        search_key = os.getenv("AZURE_SEARCH_KEY")
+
+    client = SearchIndexClient(endpoint=search_endpoint, credential=AzureKeyCredential(search_key))
+
+    for attempt in range(max_retries):
+        try:
+            client.get_index(index_name)
+            logging.info(f"✅ Index {index_name} is now available.")
+            return True
+        except Exception as e:
+            logging.info(f"⏳ Waiting for index '{index_name}' to be ready ({attempt + 1}/{max_retries})...")
+            time.sleep(delay_seconds)
+
+    logging.error(f"❌ Timed out waiting for index '{index_name}' to be ready after {max_retries * delay_seconds} seconds.")
+    return False

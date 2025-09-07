@@ -449,6 +449,9 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
     print(f"\n📦 [Index: {index_name}] Starting batch {batch_number + 1}: processing files {start + 1} to {end} of {total_files}")
     indexed_docs = []
 
+    added_files = set()
+    failed_files = set()
+
     for i, blob in enumerate(current_batch):
         print(f"📄 [Index: {index_name} ({total_files} files)] [Batch {batch_number + 1}/{total_batches}] [{start + i + 1}/{total_files}] Processing: {blob.name}")
 
@@ -516,9 +519,12 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
                     "content_embedding": vec,
                     # "summary_embedding": vector_summary
                 })
-        
+
+            added_files.add(blob.name)
+
         except Exception as e:
             print(f" ❌ Failed: {blob.name} — {str(e)}")
+            failed_files.add(blob.name)
             continue
 
     # Save updated metadata_df to blob using separate function
@@ -544,5 +550,9 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
                 "uploaded_chunks": len(indexed_docs),
                 "deleted_chunks": 0,
                 "skipped_files": 0,
+                "added_files": len(added_files),
+                "deleted_files": 0,
+                "modified_files": 0,
+                "failed_files": len(failed_files),
               }
     return results
