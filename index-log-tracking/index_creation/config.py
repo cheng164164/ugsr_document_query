@@ -23,7 +23,7 @@ ENV_VARS = {
 
 
 ########################################################################################
-
+'''
 #### Chatbot "Kimmi"
 INDEX_CONFIGS = [
     # {
@@ -41,14 +41,14 @@ INDEX_CONFIGS = [
     #     "group": 1
     # },
     {
-        "index_name": "all_regions_index_v2",
+        "index_name": "all_regions_index",
         "metadata_container": "all-regions-documents-metadata",
         "metadata_blob": "auto_extraction/all_regions_metadata_new.csv",
         "document_container": "all-regions-documents",
         "group": 1
     },
     {
-        "index_name": "ehs_index_v2",
+        "index_name": "ehs_index",
         "metadata_container": "global-ehs-documents-metadata",
         "metadata_blob": "auto_extraction/ehs_metadata_new.csv",
         "document_container": "global-ehs-documents",
@@ -83,7 +83,7 @@ SCHEMA_MAPPING_DICT = {
     #     "Function": "Function",
     #     "url": "url"
     # },
-    "all_regions_index_v2": {
+    "all_regions_index": {
         "Name": "Name",
         "Title": "Title",
         "Doc Type": "Doc Type",
@@ -92,7 +92,7 @@ SCHEMA_MAPPING_DICT = {
         "Function": "Function",
         "url": "url"
     },
-    "ehs_index_v2": {
+    "ehs_index": {
         "Name": "Name",
         "Title": None,
         "Doc Type": None,
@@ -111,16 +111,16 @@ SCHEMA_MAPPING_DICT = {
     #     "url": "url"
     # },    
 }
-
+'''
 
 
 
 ###############################################################################
-'''
+
 #### Chatbot "Andy"
 INDEX_CONFIGS = [
     {
-        "index_name": "dev_hub_index_v2",
+        "index_name": "dev_hub_index",
         "metadata_container": "development-hub-documents-metadata",
         "metadata_blob": "auto_extraction/development_hub_metadata_new.csv",
         "document_container": "development-hub-documents",
@@ -130,7 +130,7 @@ INDEX_CONFIGS = [
 
 SCHEMA_MAPPING_DICT = {
     ### Mapping of standard schema -> metadata columns
-    "dev_hub_index_v2": {
+    "dev_hub_index": {
         "Name": "Name",
         "Title": None,
         "Doc Type": None,
@@ -140,4 +140,3 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     } 
 }
-'''
