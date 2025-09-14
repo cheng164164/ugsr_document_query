@@ -52,8 +52,10 @@ share_point_urls = {
     "all_regions_index": {'name': 'Business Docuemnts All Regions', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"},
     "policy_center_index": {'name': 'Policy Center Documents', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"}
 }
-'''
 
+# Supplementary files in blob storage for each index
+supplement_files = None
+'''
 
 
 ### Chatbot Andi
@@ -69,3 +71,10 @@ metadata_files = {
 share_point_urls = {
     "dev_hub_index": {'name': 'Development Hub Documents', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/All%20Documents/Forms/AllItems.aspx"}
 }
+
+# Supplementary files in blob storage for each index
+supplement_files = {"dev_hub_index": [{'container_name': "development-hub-documents-metadata", 
+                                        'file_name': "development_hub_supplement.xlsx",
+                                        'reference_link': None },
+                                    ]
+                    }

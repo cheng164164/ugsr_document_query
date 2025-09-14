@@ -201,7 +201,6 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
             azure_oai_deployment_model, using_embedder=True, batch_number=batch_number,
             batch_size=batch_size, total_batches=total_batches, blob_subset=blobs_to_process
         )
-        metadata_df = result["metadata_df"]
 
         # ✅ Step 3: Mark batch as uploaded (success)
         update_batch_log(

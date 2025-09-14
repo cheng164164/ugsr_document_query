@@ -3,6 +3,7 @@ import uuid
 import base64
 import io
 import json
+import time
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ from azure.search.documents.indexes.models import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
-from openai import AzureOpenAI
+from openai import AzureOpenAI, RateLimitError
 import re
 
 def read_metadata_from_blob(connection_string, container_name, blob_name):
@@ -301,14 +302,29 @@ def obtain_version_and_publish_date(context, azure_oai_endpoint, azure_oai_key, 
         return None, None
 
 
-def save_metadata_to_blob(metadata_df, connection_string, container_name, blob_name):
-    output_csv = metadata_df.to_csv(index=False)
-    blob_client = BlobClient.from_connection_string(
-        conn_str=connection_string,
-        container_name=container_name,
-        blob_name=blob_name
-    )
-    blob_client.upload_blob(output_csv, overwrite=True)
+def save_metadata_to_blob(new_metadata_df, conn_str, container, blob_name):
+    blob_service_client = BlobServiceClient.from_connection_string(conn_str)
+    blob_client = blob_service_client.get_blob_client(container=container, blob=blob_name)
+
+    ## Load existing metadata
+    try:
+        existing_data = blob_client.download_blob().readall()
+        existing_df = pd.read_csv(io.BytesIO(existing_data))
+        # print("🔄 Merging with existing metadata from blob.")
+    except Exception as e:
+        print(f"📁 No existing metadata found or failed to load: {e}")
+        existing_df = pd.DataFrame()
+
+    ## Merge and deduplicate
+    combined_df = pd.concat([existing_df, new_metadata_df], ignore_index=True)
+    combined_df.drop_duplicates(subset=["Name"], keep="last", inplace=True)
+
+    ## Save back to blob
+    buffer = io.BytesIO()
+    combined_df.to_csv(buffer, index=False)
+    buffer.seek(0)
+    blob_client.upload_blob(buffer, overwrite=True)
+    # print("✅ Metadata saved successfully.")
 
 
 def is_english_filename(name):
@@ -323,6 +339,18 @@ def make_doc_id(file_key: str, chunk_id: int) -> str:
     """Return a stable document ID for Azure AI Search."""
     encoded = base64.urlsafe_b64encode(file_key.encode("utf-8")).decode("utf-8").rstrip("=")
     return f"{encoded}-chunk-{chunk_id}"
+
+
+def retry_embedding_with_backoff(embedder, chunks, max_retries=5):
+    delay = 10
+    for attempt in range(max_retries):
+        try:
+            return embedder.embed_documents([chunk.page_content for chunk in chunks])
+        except RateLimitError as e:
+            print(f"⚠️ Rate limit hit. Retry {attempt + 1}/{max_retries} in {delay}s...")
+            time.sleep(delay)
+            delay *= 2  # Exponential backoff
+    raise Exception("❌ Failed after max retries due to open AI rate limiting.")
 
 
 def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
@@ -375,7 +403,7 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
 
         chunks = splitter.create_documents([doc_content])
         if using_embedder:
-            vectors = embedder.embed_documents([chunk.page_content for chunk in chunks])
+            vectors = retry_embedding_with_backoff(embedder, chunks)
             # vector_summary = embedder.embed_documents([summary])[0]
         else:
             vectors = embedder_client.embeddings.create(model="text-embedding-3-small", input=[chunk.page_content for chunk in chunks])
@@ -487,6 +515,7 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
                 }
                 metadata_df = pd.concat([metadata_df, pd.DataFrame([new_row])], ignore_index=True)
                 meta = new_row
+                print(' New file added to metadata:', new_row)
             else:
                 idx = meta_row.index[0]
                 metadata_df.at[idx, "version"] = ver
@@ -496,7 +525,7 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
             chunks = splitter.create_documents([doc_content])
 
             if using_embedder:
-                vectors = embedder.embed_documents([chunk.page_content for chunk in chunks])
+                vectors = retry_embedding_with_backoff(embedder, chunks)
                 # vector_summary = embedder.embed_documents([summary])[0]
             else:
                 vectors = embedder_client.embeddings.create(model="text-embedding-3-small", input=[chunk.page_content for chunk in chunks])

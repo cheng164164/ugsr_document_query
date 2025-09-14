@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import hashlib
+import time
 from typing import Dict, List, Tuple, Iterable, Set
 import traceback
 import pandas as pd
@@ -26,7 +27,7 @@ from azure.search.documents.indexes.models import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
-from openai import AzureOpenAI
+from openai import AzureOpenAI, RateLimitError
 
 
 def read_metadata_from_blob(connection_string, container_name, blob_name):
@@ -285,11 +286,29 @@ def obtain_version_and_publish_date(context, azure_oai_endpoint, azure_oai_key, 
         return None, None
 
 
-def save_metadata_to_blob(metadata_df: pd.DataFrame, connection_string: str, container_name: str, blob_name: str) -> None:
-    """Persist a DataFrame as CSV to a blob path, overwriting prior content."""
-    output_csv = metadata_df.to_csv(index=False)
-    blob_client = BlobClient.from_connection_string(conn_str=connection_string, container_name=container_name, blob_name=blob_name)
-    blob_client.upload_blob(output_csv, overwrite=True)
+def save_metadata_to_blob(new_metadata_df, conn_str, container, blob_name):
+    blob_service_client = BlobServiceClient.from_connection_string(conn_str)
+    blob_client = blob_service_client.get_blob_client(container=container, blob=blob_name)
+
+    ## Load existing metadata
+    try:
+        existing_data = blob_client.download_blob().readall()
+        existing_df = pd.read_csv(io.BytesIO(existing_data))
+        # print("🔄 Merging with existing metadata from blob.")
+    except Exception as e:
+        print(f"📁 No existing metadata found or failed to load: {e}")
+        existing_df = pd.DataFrame()
+
+    ## Merge and deduplicate
+    combined_df = pd.concat([existing_df, new_metadata_df], ignore_index=True)
+    combined_df.drop_duplicates(subset=["Name"], keep="last", inplace=True)
+
+    ## Save back to blob
+    buffer = io.BytesIO()
+    combined_df.to_csv(buffer, index=False)
+    buffer.seek(0)
+    blob_client.upload_blob(buffer, overwrite=True)
+    # print("✅ Metadata saved successfully.")
 
 
 def is_english_filename(name: str) -> bool:
@@ -312,6 +331,18 @@ def compute_sha256(text: str) -> str:
     if text is None:
         text = ""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def retry_embedding_with_backoff(embedder, texts: List[str], max_retries=5):
+    delay = 10
+    for attempt in range(max_retries):
+        try:
+            return embedder.embed_documents(texts)
+        except RateLimitError as e:
+            print(f"⚠️ Rate limit hit. Retry {attempt + 1}/{max_retries} in {delay}s...")
+            time.sleep(delay)
+            delay *= 2  # Exponential backoff
+    raise Exception("❌ Failed after max retries due to open AI rate limiting.")
 
 
 def get_existing_chunks(search_client: SearchClient, filename: str) -> Dict[str, Dict]:
@@ -373,7 +404,7 @@ def chunk_and_embed_single_file(
     existing_hashes = {v['chunk_id']: v['content_sha256'] for v in existing.values()}
     current_hashes = {i: h for i, h in enumerate(chunk_hashes)}
     if existing_hashes == current_hashes:
-        return [], []
+        return metadata_df, [], []
 
     # Only now do the expensive work
     topics = obtain_topics(doc_content, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version)
@@ -396,6 +427,7 @@ def chunk_and_embed_single_file(
         }
         metadata_df = pd.concat([metadata_df, pd.DataFrame([new_row])], ignore_index=True)
         meta = new_row
+        print(' New file added to metadata:', new_row)
     else:
         idx = meta_row.index[0]
         metadata_df.at[idx, "version"] = ver
@@ -403,7 +435,7 @@ def chunk_and_embed_single_file(
         meta = meta_row.iloc[0].to_dict()
 
     if using_embedder:
-        vectors = embedder.embed_documents(texts)
+        vectors = retry_embedding_with_backoff(embedder, texts)
     else:
         resp = embedder_client.embeddings.create(model="text-embedding-3-small", input=texts)
         vectors = [item.embedding for item in resp.data]
@@ -439,7 +471,7 @@ def chunk_and_embed_single_file(
         )
 
     to_delete = [doc_id for doc_id in existing.keys() if doc_id not in new_ids]
-    return new_docs, to_delete
+    return metadata_df, new_docs, to_delete
 
 
 def upload_search_index(index_name: str, search_key: str, search_endpoint: str, indexed_docs: List[dict]) -> None:
@@ -530,22 +562,22 @@ def data_chunk_embed_upload_batch(
             continue
         current_filenames.add(blob.name.lower())
         try:
-            new_docs, to_delete = chunk_and_embed_single_file(
-                splitter=splitter,
-                embedder=embedder,
-                embedder_client=embedder_client,
-                connection_string=connection_string,
-                container_name=container_name,
-                metadata_df=metadata_df,
-                file_blob_name=blob.name,
-                azure_doc_intell_endpoint=azure_doc_intell_endpoint,
-                azure_doc_intell_key=azure_doc_intell_key,
-                azure_oai_endpoint=azure_oai_endpoint,
-                azure_oai_key=azure_oai_key,
-                azure_openai_api_version=azure_openai_api_version,  
-                azure_oai_deployment_model=azure_oai_deployment_model,
-                search_client=search_client,
-                using_embedder=using_embedder,
+            metadata_df, new_docs, to_delete = chunk_and_embed_single_file(
+                                                splitter=splitter,
+                                                embedder=embedder,
+                                                embedder_client=embedder_client,
+                                                connection_string=connection_string,
+                                                container_name=container_name,
+                                                metadata_df=metadata_df,
+                                                file_blob_name=blob.name,
+                                                azure_doc_intell_endpoint=azure_doc_intell_endpoint,
+                                                azure_doc_intell_key=azure_doc_intell_key,
+                                                azure_oai_endpoint=azure_oai_endpoint,
+                                                azure_oai_key=azure_oai_key,
+                                                azure_openai_api_version=azure_openai_api_version,  
+                                                azure_oai_deployment_model=azure_oai_deployment_model,
+                                                search_client=search_client,
+                                                using_embedder=using_embedder,
             )
 
             # Log changes per file

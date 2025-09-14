@@ -346,8 +346,8 @@ def should_use_metadata_search(query):
             "role": "system",
             "content": (
                 "You are a router. Your job is to decide whether a query should be answered by:\n"
-                "- metadata: if it asks for listings, like filenames, titles, document types, categories, release version, revision date, release data of the documents in the resources etc.\n"
-                "- semantic: if it needs detailed answers from document content.\n"
+                "- metadata: only if it asks for listing of metadata terms such as filenames, titles, document types, categories, release version, revision date, release data of the documents in the resources etc.\n"
+                "- semantic: if the query asks for listing of terms outside of above metadata terms, or it needs detailed answers from document content.\n"
                 "If the query is ambiguous or general, prefer semantic.\n"
                 "If the query contains words like 'metadata', choose metadata. If the query contains words like 'content', choose semantic.\n"
                 "Only reply with one word: 'metadata' or 'semantic'."
@@ -383,7 +383,8 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
             "Do not infer or guess intent beyond what the context supports. Do NOT introduce unrelated interpretations of words based on common alternative meanings.\n"
             "Only consider what is explicitly stated in the context.\n"
             "Your reply must start with 'yes' or 'no'. Then give a brief reason why.\n"
-            "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about — but DO NOT mention any unrelated definitions or meanings of user terms.\n"
+            "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about — but DO NOT mention any unrelated definitions or meanings of the words.(eg:, cranes)\n"
+            "For example, if the USER QUESTION mentions 'crane', and the context is about lifting equipment, do not mention bird species.\n"
             "The purpose of explainaton is also to help guide the user toward a more appropriate query.\n"
             "If the query partially matches certain keywords in the CONTEXT, prompt the user for clarification, but ONLY based on the meaning used within the CONTEXT.\n"
             "End by asking: 'Would you like to clarify your question?'"

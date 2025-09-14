@@ -5,13 +5,13 @@ import json
 import os
 import time
 
-MAX_RETRIES = 5
-RETRY_DELAY = 2  # seconds
+MAX_RETRIES = 9
+RETRY_DELAY = 1  # seconds
 
 def connect_with_retry(conn_str):
     for attempt in range(MAX_RETRIES):
         try:
-            return pyodbc.connect(conn_str, timeout=5)
+            return pyodbc.connect(conn_str, timeout=30)
         except Exception as e:
             logging.warning(f"DB connection attempt {attempt+1} failed: {e}")
             time.sleep(RETRY_DELAY)
