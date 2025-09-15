@@ -54,8 +54,9 @@ share_point_urls = {
 }
 
 # Supplementary files in blob storage for each index
-supplement_files = None
+supplement_files = {}
 '''
+######################### Chatbot Config ######################################
 
 
 ### Chatbot Andi
@@ -73,8 +74,5 @@ share_point_urls = {
 }
 
 # Supplementary files in blob storage for each index
-supplement_files = {"dev_hub_index": [{'container_name': "development-hub-documents-metadata", 
-                                        'file_name': "development_hub_supplement.xlsx",
-                                        'reference_link': None },
-                                    ]
-                    }
+supplement_files = {"dev_hub_index": [{'file_name': "Change_Management_HomePage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Change-Management.aspx"}]
+}

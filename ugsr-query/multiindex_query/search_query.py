@@ -12,8 +12,8 @@ import json
 import io
 import openpyxl
 import pandas as pd
-from .config import ENV_VARS, index_names, metadata_files, share_point_urls, feature_flags
-from .util import * 
+from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags
+from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url
 
 
 set_env_vars(ENV_VARS)
@@ -905,6 +905,10 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         api_version="2024-12-01-preview"
     )
 
+    # # Handle None supplement_files
+    # if supplement_files is None:
+    #     supplement_files = {}
+
     warning_msg, top_chunks = context
     context_texts = []
     doc_groups  = {}
@@ -914,11 +918,11 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         content = doc.get("content", "")
         score = doc.get('_final_score', 0)
         context_texts.append(f"[{filename}] {content}")
-
+        url = resolve_reference_url(filename, doc.get("url", "N/A"), supplement_files)
         if filename not in doc_groups :
             doc_groups [filename] = {
                 "document_name": filename,
-                "url": doc.get("url", "N/A"),
+                "url": url,
                 "key_contact": doc.get("owner", "N/A"),
                 "key_topics": doc.get("topics", ""),
                 "key_terms": doc.get("terms", ""),
@@ -953,11 +957,15 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
 
             # Determine which document has the most votes
             most_common_doc = max(file_votes.values(), key=lambda x: x['count'])['chunk']
-            url_value = (most_common_doc.get("url") or "").split(";")[0].strip()
+            most_common_filename = most_common_doc.get("filename", "N/A")
+            url_value = resolve_reference_url( most_common_filename,
+                                               (most_common_doc.get("url") or "").split(";")[0].strip(),
+                                               supplement_files
+                                            )
             main_answer += (
                 "\n\n---\n Please refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
                 "**Document**:"
-                f"  [{title_case_filename(most_common_doc.get('filename', 'N/A'))}]({url_value})\n\n"
+                f"  [{title_case_filename(most_common_filename)}]({url_value})\n\n"
                 f"**Key Contact**: {title_case_name(most_common_doc.get('owner', 'N/A'))}"
             )
         
@@ -998,7 +1006,10 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
 
     for doc in list(doc_groups.values())[:3]:
         document_name = title_case_filename(doc['document_name'])
-        url_value = (doc.get("url") or "").split(";")[0].strip()
+        url_value = resolve_reference_url(doc['document_name'], 
+                                          (doc.get("url") or "").split(";")[0].strip(), 
+                                          supplement_files)
+        
         key_contact = title_case_name(doc['key_contact']) 
         if hide_ref_relevance:
             reference_text += (

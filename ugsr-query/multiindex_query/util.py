@@ -37,3 +37,16 @@ def title_case_name(name):
     except Exception:
         return name
 
+
+def resolve_reference_url(filename: str, original_url: str, supplement_files: dict) -> str:
+    """
+    Returns a reference link for the document.
+    If the filename is listed in supplement_files, return the associated reference_link.
+    Otherwise, return the original_url.
+    """
+    cleaned_filename = filename.strip().lower()
+    for index_docs in supplement_files.values():
+        for entry in index_docs:
+            if entry.get("file_name", "").strip().lower() == cleaned_filename:
+                return entry.get("reference_link", original_url)
+    return original_url
