@@ -13,7 +13,7 @@ import io
 import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags
-from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url
+from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, truncate_history,tokenizer
 
 
 set_env_vars(ENV_VARS)
@@ -99,6 +99,7 @@ def filter_relevant_history(current_query, query_history, answer_history):
             api_version="2024-12-01-preview"
         )
 
+        history_turns = truncate_history(history_turns)
         transcript = "\n\n".join(history_turns)
 
         prompt = (
@@ -500,22 +501,27 @@ def metadata_table_by_index(index_names):
     return metadata_by_index
 '''
 
-def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
+def summarize_metadata_per_index(index_name, query, relevant_history_text, docs):
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_API_KEY,
         api_version="2024-12-01-preview"
     )
 
-    index_contexts = []
-    for index_name, docs in metadata_by_index.items():
-        context_lines = [f"\nIndex: {index_name}"]
-        for doc in docs:
-            row_desc = "; ".join(f"{k}: {v}" for k, v in doc.items())
-            context_lines.append(f"- {row_desc}")
-        index_contexts.append("\n".join(context_lines))
-    full_context = "\n\n".join(index_contexts)
-
+    metadata_lines = []
+    for doc in docs:
+        metadata_lines.append(
+                            f"- Name: {doc.get('Name', '')}\n"
+                            f" - Title: {doc.get('Title', '')}\n"
+                            f" - Doc Type: {doc.get('Doc Type', '')}\n"
+                            f" - Doc Category: {doc.get('Doc Category', '')}\n"
+                            f" - Function: {doc.get('Function', '')}\n"
+                            f" - Owner: {doc.get('Document Owner(s)', '')}\n"
+                            f" - Version: {doc.get('version', '')}\n"
+                            f" - Publish Date: {doc.get('publish date', '')}\n"
+                            f" - URL: {doc.get('url', '')}\n"
+                            )
+    metadata_text = "\n".join(metadata_lines)
     history_prefix = (
         f"RELEVANT CHAT HISTORY:\n{relevant_history_text}\n\n"
         if relevant_history_text else ""
@@ -525,13 +531,13 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
         f"You are an assistant that summarizes document metadata.\n"
         f"{history_prefix}"
         f"USER QUERY:\n{query}\n\n"
-        f"DOCUMENT METADATA:\n{full_context}\n\n"
+        f"DOCUMENT METADATA:\n{metadata_text}\n\n"
         f"Instructions:\n"
         f"- Use history only if it helps clarify the current query.\n"
         f"-Only answer the current query. Do not answer or repeat previous questions.\n"
-        f"-If the query mentions a specific index, only summarize that index. Otherwise, summarize all indexes.\n"
-        f"-list as many relevant documents as possible that match the user query.\n"
-        f"-If you are not sure about the answer or nothing relevant is found, say 'Sorry, I cannot help with it. Please try looking it up on the share point links'.\n"
+        f"-If the query mentions a specific index, only summarize for that index. if index does not match, simply skip the search and say '(No relevant metadata found in this index.)'.\n"
+        f"-Only need to return 10 items at most in the response. If found 10 items, no more search is needed.\n"
+        f"-If no relevant documents are found, respond with:'(No relevant metadata found in this index.)'\n"        
         f"-Use clear bullet points or sections."
     )
     
@@ -540,17 +546,80 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
         messages=[{"role": "user", "content": prompt}]
     )
     summary = completion.choices[0].message.content.strip()
+    
+    return   f"Index: {index_name}\n" + summary         
 
-    # Append SharePoint links as references
-    reference_links = "\n\n\nMore metadata information can be found from the SharePoint.\n\n"+ "**SharePoint Links:**\n"
 
+def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
+    # all_responses = []
+    # for index_name, docs in metadata_by_index.items():
+    #     if not docs:
+    #         continue
+    #     result = summarize_metadata_per_index(index_name, query, relevant_history_text, docs)
+    #     all_responses.append(result)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [
+                    executor.submit(summarize_metadata_per_index, index_name, query, relevant_history_text, docs)
+                    for index_name, docs in metadata_by_index.items() if docs
+                ]
+    all_responses = [f.result() for f in futures]
+
+    combined_summary = summarize_combined_metadata_results(query, all_responses)
+
+    # Add SharePoint reference section
+    reference_links = "\n\n\nMore metadata information can be found from the SharePoint.\n\n**SharePoint Links:**\n"
     for index, values in share_point_urls.items():
         name = values.get("name", "Unknown")
         url = values.get("url", "")
         if url:
             reference_links += f"- [{name}]({url})\n\n"
 
-    return  f"**Answer:**\n\n{summary} \n\n\n\n {reference_links}"         
+    return f"**Answer:**\n\n{combined_summary} \n\n\n\n{reference_links}"
+
+
+def summarize_combined_metadata_results(query, raw_summaries: list):
+    non_empty = [
+        s for s in raw_summaries
+        if "(No relevant metadata found" not in s and s.strip()
+    ]
+
+    if not non_empty:
+        return "Sorry, I cannot help with it. Please try looking it up on the SharePoint links."
+
+    combined_input = "\n\n".join(non_empty)
+
+    system_prompt = (
+        "You are a summarization assistant that combines metadata results across document libraries.\n"
+        "You are given raw summaries of relevant documents grouped by index.\n"
+        "\n"
+        "Your job is to:\n"
+        "- Remove any irrelevant or empty responses\n"
+        "- Merge similar items if duplicates exist\n"
+        "- Present a clear, final summary answering the user query\n"
+        "- Organize items logically (grouped by index if helpful)\n"
+        "- Use bullet points or clean formatting\n"
+        "\n"
+        "DO NOT invent entries. Only use what is in the raw results."
+    )
+
+    user_prompt = f"USER QUERY:\n{query}\n\nRAW METADATA RESULTS:\n{combined_input}"
+
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version="2024-12-01-preview"
+    )
+
+    completion = client.chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+    )
+
+    return completion.choices[0].message.content.strip()
 
 
 

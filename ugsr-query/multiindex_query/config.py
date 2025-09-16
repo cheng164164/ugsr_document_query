@@ -26,7 +26,7 @@ feature_flags = {
 
 ######################### Chatbot Config ######################################
 ### Chatbot Kimmi
-'''
+
 # Define mutli indexes names to search
 index_names = ["business_index",
                "ugsr_index",
@@ -49,16 +49,16 @@ share_point_urls = {
     "business_index": {'name': 'Business Documents North America', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00243/SitePages/PublishedDocuments.aspx"},
     "ugsr_index": {'name': 'UGSR Engineering Documents', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00221/engres_joy/PPED/JGUEngDocs?viewpath=%2Fsites%2FNAGMUSGR00221%2Fengres%5Fjoy%2FPPED%2FJGUEngDocs"},
     "ehs_index": {'name': 'Global EHS Documents', "url": "https://globalkomatsu.sharepoint.com/sites/Velocity-GlobalPoliciesandProcedures/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FVelocity%2DGlobalPoliciesandProcedures%2FShared%20Documents%2FGeneral%2FGlobal%20EHS%20Policies&viewid=3d027989%2Ddf2e%2D434d%2Da643%2D3e28353d8fbb&csf=1&web=1&e=pcFPZF&CID=940883b9%2D627f%2D4a42%2D8bad%2D5120ca6b6223&FolderCTID=0x0120003F332C7233C5DB4A94D41DD5FBC21C23"},
-    "all_regions_index": {'name': 'Business Docuemnts All Regions', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"},
+    "all_regions_index": {'name': 'Business Docuemnts All Regions', "url": "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00243/SitePages/PublishedDocuments.aspx"},
     "policy_center_index": {'name': 'Policy Center Documents', "url": "https://globalkomatsu.sharepoint.com/sites/komunity/policycenter/SitePages/Policy-Center-Landing-Page.aspx"}
 }
 
 # Supplementary files in blob storage for each index
 supplement_files = {}
-'''
+
 ######################### Chatbot Config ######################################
 
-
+'''
 ### Chatbot Andi
 index_names = ["dev_hub_index"
               ]
@@ -76,3 +76,4 @@ share_point_urls = {
 # Supplementary files in blob storage for each index
 supplement_files = {"dev_hub_index": [{'file_name': "Change_Management_HomePage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Change-Management.aspx"}]
 }
+'''

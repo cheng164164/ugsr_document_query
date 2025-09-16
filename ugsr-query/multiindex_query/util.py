@@ -1,6 +1,17 @@
 import os
 import re
 import pandas as pd
+import logging
+from tiktoken import get_encoding
+from openai import AzureOpenAI
+
+# Tokenizer for GPT-4o (O3 models)
+tokenizer = get_encoding("cl100k_base")
+
+# Max token budget for safety (adjustable)
+MAX_TOTAL_TOKENS = 16000
+EXPECTED_COMPLETION_TOKENS = 1000
+MAX_INPUT_TOKENS = MAX_TOTAL_TOKENS - EXPECTED_COMPLETION_TOKENS
 
 def set_env_vars(ENV_VARS=None):
     """
@@ -50,3 +61,19 @@ def resolve_reference_url(filename: str, original_url: str, supplement_files: di
             if entry.get("file_name", "").strip().lower() == cleaned_filename:
                 return entry.get("reference_link", original_url)
     return original_url
+
+
+def count_tokens(text):
+    return len(tokenizer.encode(text))
+
+
+def truncate_history(history_turns, max_tokens=MAX_INPUT_TOKENS):
+    total_tokens = 0
+    truncated = []
+    for turn in reversed(history_turns): # Newest to oldest
+        tokens = count_tokens(turn)
+        if total_tokens + tokens > max_tokens:
+            break
+        truncated.insert(0, turn)
+        total_tokens += tokens
+    return truncated
