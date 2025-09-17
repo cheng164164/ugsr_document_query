@@ -66,6 +66,30 @@ def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "conte
         return raw_query if raw_query else ""
 
 
+def decompose_query(query: str) -> list[str]:
+    prompt = f"""
+                You are a retrieval agent that helps break down complex user questions into simpler sub-questions.
+                Decompose this question into smaller, standalone sub-questions that can be answered individually.
+                Only decompose if the question clearly contains multiple parts. If it’s already simple, return a one-item list.
+                Return your response as a JSON array of strings.
+                User question: "{query}"
+             """
+    client = AzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version="2024-12-01-preview"
+        )
+    try:
+        response = client.chat.completions.create(
+            model= "o4-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        logging.warning(f"❌ Failed to decompose query: {e}")
+        return [query]
+    
+
 def filter_relevant_history(current_query, query_history, answer_history):
     """
     Filters relevant user-bot turns from chat history based on the current query.
@@ -1134,3 +1158,31 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
         )
 
     return f"**Answer:**\n\n{main_answer}{reference_text}"
+
+
+def combine_subquery_answers(subquery_answer_map: dict, original_query: str) -> str:
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version="2024-12-01-preview"
+    )
+
+    if len(subquery_answer_map) == 1:
+        return list(subquery_answer_map.values())[0]
+
+    formatted_answers = "\n\n".join(
+                                    [f"**Q:** {q}\n**A:** {a}" for q, a in subquery_answer_map.items()]
+                                    )
+
+    llm_prompt = (
+    f"The user asked: \"{original_query}\"\n\n"
+    f"The following are responses to sub-questions related to the query:\n\n"
+    f"{formatted_answers}\n\n"
+    "Please combine these answers into a single, coherent response for the user:"
+    )
+
+    response = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                messages=[{"role": "user", "content": llm_prompt}],
+                )
+    return response.choices[0].message.content.strip()

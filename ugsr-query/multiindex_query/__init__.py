@@ -70,10 +70,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             history_context = ""
             rewrited_query = cleaned_query
 
+        sub_queries = decompose_query(rewrited_query)[:4]  # Limit to top 4 sub-queries
+
         ## Step 1 : Check if query mentions a specific index
         target_index = detect_specific_index(query, index_aliases)
 
-        ## Step 2: Check if metadata search is needed
+        ## Step 2: Check if metadata search is needed to gnenerate answer
         if metadata_search:
             use_metadata_search_flag = should_use_metadata_search(query)    # use raw query for routing decision
             if use_metadata_search_flag:
@@ -83,7 +85,21 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 else:
                     metadata_by_index = metadata_table_by_index(index_names)
 
-                llm_summary = summarize_full_metadata(rewrited_query, history_context, metadata_by_index)  
+                def handle_subquery_metadata(subq):
+                    sub_ans = summarize_full_metadata(subq, history_context, metadata_by_index)
+                    return f"**Q:** {subq}\n**A:** {sub_ans}"
+                
+                if len(sub_queries) == 1:
+                    llm_summary = handle_subquery_metadata(sub_queries[0])
+                else:
+                    if parallel_queries:
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            subquery_results = list(executor.map(handle_subquery_metadata, sub_queries))
+                    else:
+                        subquery_results = [handle_subquery_metadata(sq) for sq in sub_queries]
+
+                    subquery_answer_map = dict(zip(sub_queries, subquery_results))
+                    llm_summary = combine_subquery_answers(subquery_answer_map, cleaned_query)
 
                 try:
                     save_chat(user_id, user_name, "bot", llm_summary, metadata)
@@ -92,8 +108,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
                 return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
-
-        ## Step 3: Search all indexes
+        ## Step 3: Otherwise, Search all indexes and generate answer
         if target_index:
             logging.info(f"🎯 Content search restricted to index: {target_index}")
             search_scope = [target_index]
@@ -101,20 +116,33 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         else:
             search_scope = index_names
             parallel_flag = parallel_queries
-        docs = multi_index_search_documents(cleaned_query, rewrited_query, search_scope, vector_weight=0.6, top_k=8, 
-                                                            dynamic_filtering=dynamic_filtering, 
-                                                            keywords_matching = keywords_matching,
-                                                            custom_ranking=custom_ranking,
-                                                            use_previous_context = use_prev_context,    
-                                                            parallel=parallel_flag, 
-                                                            debug=debug_mode)
-        if not docs:
-            return func.HttpResponse("No relevant documents found.", status_code=404)
-        
-        ## Step 4: Generate response from AI with retrieved context
-        ai_response = multi_index_generate_response(rewrited_query, docs, hide_ref_relevance=hide_ref_relevance)
 
-        ## Step 5: Save bot response with metadata
+        def process_content_subquery(subq):
+            docs = multi_index_search_documents(cleaned_query, rewrited_query, search_scope, vector_weight=0.6, top_k=8, 
+                                                                dynamic_filtering=dynamic_filtering, 
+                                                                keywords_matching = keywords_matching,
+                                                                custom_ranking=custom_ranking,
+                                                                use_previous_context = use_prev_context,    
+                                                                parallel=parallel_flag, 
+                                                                debug=debug_mode)
+            
+            if not docs:
+                return func.HttpResponse("No relevant documents found.", status_code=404)
+            return multi_index_generate_response(subq, docs, hide_ref_relevance=hide_ref_relevance)
+        
+        if len(sub_queries) == 1:
+            ai_response = process_content_subquery(sub_queries[0])
+        else:
+            if parallel_queries:
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    subquery_results = list(executor.map(process_content_subquery, sub_queries))
+            else:
+                subquery_results = [process_content_subquery(sq) for sq in sub_queries]
+
+            subquery_answer_map = dict(zip(sub_queries, subquery_results))
+            ai_response = combine_subquery_answers(subquery_answer_map, cleaned_query)
+            
+        ## Step 4: Save bot response with metadata
         try:
             save_chat(user_id, user_name, "bot", ai_response, metadata)
         except Exception as e:
