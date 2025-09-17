@@ -2,6 +2,7 @@ azure-functions
 openai
 requests
 openpyxl
+pyodbc
 azure-storage-blob>=12.14.0
 pandas[numpy]>=1.5.0,<2.2.0
 tiktoken>=0.5.1

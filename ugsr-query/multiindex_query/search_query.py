@@ -24,37 +24,42 @@ AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "text-embedding-3-small"
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
 
 def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "contents"}):
     """
-    Removes standalone routing keywords from the query if they are not part of a sentence.
-    Argument:  raw_query  -  can be single query or query history (sperated by '|')
+    Cleans a single query or a query history string separated by '|'.
+    - If input contains '|', split into segments by '|', clean each, then rejoin.
+    - If input is a single query, clean it directly.
     """
     try:
         if not raw_query or not isinstance(raw_query, str):
             return ""
 
-        # Normalize and split query into clauses using punctuation or pipes
-        parts = re.split(r'[,.!?;|\n]+', raw_query)
-        cleaned = []
+        def clean_segment(segment: str) -> str:
+            # Split on sentence punctuation only, not pipes
+            parts = re.split(r'[,.!?;\n]+', segment)
+            cleaned = []
+            for part in parts:
+                stripped = part.strip()
+                if not stripped:
+                    continue
+                # Skip if it's exactly or only routing keywords
+                if stripped.lower() in route_keywords:
+                    continue
+                if all(w.lower() in route_keywords for w in stripped.split()):
+                    continue
+                cleaned.append(stripped)
+            return ". ".join(cleaned).strip()
 
-        for part in parts:
-            stripped = part.strip()
-            if not stripped:
-                continue
-            # Skip if it's exactly or only routing keywords
-            if stripped.lower() in route_keywords:
-                continue
-            if all(w.lower() in route_keywords for w in stripped.split()):
-                continue
-            cleaned.append(stripped)
-
-        # Recombine
-        if '|' in raw_query:
-            return '| '.join(cleaned).strip()
+        if "|" in raw_query:
+            # Process history: split by '|', clean each, rejoin
+            segments = [s.strip() for s in raw_query.split("|") if s.strip()]
+            cleaned_segments = [clean_segment(seg) for seg in segments if seg]
+            return " | ".join(cleaned_segments)
         else:
-            return '. '.join(cleaned).strip()
+            # Process single query
+            return clean_segment(raw_query)
 
     except Exception as e:
         logging.error(f"Error cleaning query: {e}")
@@ -535,7 +540,7 @@ def summarize_metadata_per_index(index_name, query, relevant_history_text, docs)
         f"Instructions:\n"
         f"- Use history only if it helps clarify the current query.\n"
         f"-Only answer the current query. Do not answer or repeat previous questions.\n"
-        f"-If the query mentions a specific index, only summarize for that index. if index does not match, simply skip the search and say '(No relevant metadata found in this index.)'.\n"
+        f"-If the query mentions a specific index name or library, only summarize for that index. if index name does not match, simply skip the search'.\n"
         f"-Only need to return 10 items at most in the response. If found 10 items, no more search is needed.\n"
         f"-If no relevant documents are found, respond with:'(No relevant metadata found in this index.)'\n"        
         f"-Use clear bullet points or sections."

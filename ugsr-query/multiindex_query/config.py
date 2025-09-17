@@ -4,9 +4,11 @@ ENV_VARS = {
     "AZURE_OPENAI_KEY": "<your_openai_key>",
     "AZURE_OPENAI_DEPLOYMENT_NAME": "<your_openai_deployment_name>",
     "AZURE_OPENAI_ENDPOINT": "<your_openai_endpoint>",
+    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "<your_openai_embedding_deployment>",
     "AZURE_SEARCH_ENDPOINT": "<your_search_endpoint>",
     "AZURE_SEARCH_KEY": "<your_search_key>",
     "AZURE_SEARCH_INDEX": "<your_search_index_name>",
+    "AZURE_SQL_CONN_STR": "<your_sql_connection_string>"
 }
 
 
@@ -19,7 +21,8 @@ feature_flags = {
     "keywords_matching": False,   # Set to True to enable keyword matching check and warning 
     "metadata_search": True,     # Set to True to enable metadata-only search for relevant queries
     "use_prev_context": True,    # Set to True to enable the feature that uses previous queries as context
-    "hide_ref_relevance": True    # Set to True to hide relevance explanation in the reference section
+    "hide_ref_relevance": True,    # Set to True to hide relevance explanation in the reference section
+    "mock_db": False    # Set to True to use mock DB functions for testing without actual DB connection
 }
 
 
@@ -56,6 +59,14 @@ share_point_urls = {
 # Supplementary files in blob storage for each index
 supplement_files = {}
 
+# Aliases for each index to catch user queries that mention library/index by name
+index_aliases = {
+    "business_index": ["north america", "north americas", "ameirca north", "americas north"],
+    "ugsr_index": ["ugsr", "underground", "engineering"],
+    "ehs_index": ["ehs", "global ehs"],
+    "all_regions_index": ["all regions", "all region", "regions all", "region all"],
+    "policy_center_index": ["policy center", "policy-center"]
+}
 ######################### Chatbot Config ######################################
 
 '''
@@ -76,4 +87,7 @@ share_point_urls = {
 # Supplementary files in blob storage for each index
 supplement_files = {"dev_hub_index": [{'file_name': "Change_Management_HomePage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Change-Management.aspx"}]
 }
+
+# Aliases for each index to catch user queries that mention library/index by name
+index_aliases = {}
 '''
