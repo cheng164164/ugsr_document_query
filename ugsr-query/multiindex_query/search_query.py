@@ -68,26 +68,120 @@ def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "conte
 
 def decompose_query(query: str) -> list[str]:
     prompt = f"""
-                You are a retrieval agent that helps break down complex user questions into simpler sub-questions.
-                Decompose this question into smaller, standalone sub-questions that can be answered individually.
-                Only decompose if the question clearly contains multiple parts. If it’s already simple, return a one-item list.
-                Return your response as a JSON array of strings.
-                User question: "{query}"
-             """
+        You are an expert assistant that decomposes complex multi-part questions into smaller, independent sub-questions—**but only when necessary**.
+        Your rules:
+        - If the input question is already focused, specific, or atomic, return it as a single-item list.
+        - Break it into multiple sub-questions if the question clearly involves multiple steps, tasks, or clauses joined with words like “and,” “then,” “first... next...,” or is clearly a compound query.
+        - Words like "what, how, who, why, when, where, which" often indicate separate sub-questions. You can decompose based on these cues.
+        - Some questions may refer to more than one concept (e.g. “risks and mitigation strategies”), but if these are tightly related and part of the same topic, do **not** split them. 
+          Only decompose when the question naturally contains multiple distinct tasks or inquiries.
+        - Do **not** over-explain or expand single question or sub-questions, preserve the original phrasing of them.
+        Examples:
+        Q: "What are the risks and mitigation strategies for cloud migration?"
+        → ["What are the risks and mitigation strategies for cloud migration?"]
+        Q: "Who is the design owner for GMNR Auth Group and what is the design owner responsible for global controlled design?"
+        → ["Who is the design owner for GMNR Auth Group?", "What is the design owner responsible for in global controlled design?"]
+        Q: "How do I perform a software release test?"
+        → ["How do I perform a software release test?"]
+        Q: "First I want to extract the data, then clean it, and finally store it."
+        → ["How do I extract the data?", "How do I clean the data?", "How do I store the data?"]
+        Respond with a JSON array of sub-questions.
+        User question: "{query}"
+    """.strip()
+
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version="2024-12-01-preview"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="o4-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = json.loads(response.choices[0].message.content)
+        if isinstance(result, list) and all(isinstance(item, str) for item in result) and result:
+            return result
+        else:
+            return [query]
+    except Exception as e:
+        logging.warning(f"❌ Failed to decompose query: {e}")
+        return [query]
+    
+
+def select_relevant_indexes_via_llm(query, index_metadata_summaries: dict, top_n: int = 2) -> list[str]:
+    """
+    Use LLM to select the top N most relevant indexes for the given query based on metadata summaries.
+    """
+    if not index_metadata_summaries:
+        return []
+
     client = AzureOpenAI(
             azure_endpoint=AZURE_OPENAI_ENDPOINT,
             api_key=AZURE_OPENAI_API_KEY,
             api_version="2024-12-01-preview"
         )
+    
+    prompt = f"""
+            You are a document routing assistant.
+
+            Your task is to evaluate the user's question and determine which document indexes are **most likely** to contain information related to that question, based on metadata summaries of each index.
+            The index metadata summaries provide a brief overview of the topics, terms. Keywords matching is good indicator of relevance, but also consider related concepts and synonyms. 
+            Important:
+            - You are **not** answering the user's question.
+            - You are **not** checking if the answer is guaranteed to exist.
+            - You are simply ranking which indexes are most likely to be useful based on their description and scope.
+            - You must assign a score between 1 and 10 to each index (10 = highly relevant, 1 = not relevant).
+            - Return the top 1 or 2 indexes based on these scores.
+
+            User query:
+            \"{query}\"
+
+            Available indexes and their metadata summaries:
+            """
+    for index_name, summary in index_metadata_summaries.items():
+        prompt += f"- {index_name}: {summary}\n"
+
+    prompt += """
+            Return a JSON object with the following structure:
+
+            {
+            "ranked": [["index_name", score], ...],
+            "selected": ["top_index", "optional_second_index_if_close"]
+            }
+
+            Only include the second index in \"selected\" if its score is at least 70% of the top one.
+            Do not return an empty list. Use only the index names provided above.
+            Make sure to vary the scores meaningfully. Do not assign all indexes the same score.
+            """
+    
     try:
         response = client.chat.completions.create(
-            model= "o4-mini",
-            messages=[{"role": "user", "content": prompt}]
+        model="o4-mini",
+        messages=[
+        {"role": "system", "content": "You are a helpful assistant that selects document indexes based on metadata relevance."},
+        {"role": "user", "content": prompt}
+        ]
         )
-        return json.loads(response.choices[0].message.content)
+
+        content = response.choices[0].message.content.strip()
+        parsed = json.loads(content)
+
+        selected = parsed.get("selected", [])
+        ranked = parsed.get("ranked", [])
+
+        logging.info("📊 LLM index ranking scores: " + "; ".join([f"{name}: {score}" for name, score in ranked]))
+        valid = [idx for idx in selected if idx in index_metadata_summaries]
+        if not valid:
+            logging.warning("⚠️ LLM returned no valid selected indexes, falling back to top 2.")
+            return list(index_metadata_summaries.keys())[:2]
+
+        return valid[:2]
+
     except Exception as e:
-        logging.warning(f"❌ Failed to decompose query: {e}")
-        return [query]
+        logging.warning(f"⚠️ LLM index selection failed: {e}")
+        return []  # Fallback
     
 
 def filter_relevant_history(current_query, query_history, answer_history):
@@ -576,33 +670,43 @@ def summarize_metadata_per_index(index_name, query, relevant_history_text, docs)
     )
     summary = completion.choices[0].message.content.strip()
     
-    return   f"Index: {index_name}\n" + summary         
+    return   f"---\📚 Index: {index_name}\n\n {summary}\n---"         
 
 
-def summarize_full_metadata(query, relevant_history_text, metadata_by_index):
-    # all_responses = []
-    # for index_name, docs in metadata_by_index.items():
-    #     if not docs:
-    #         continue
-    #     result = summarize_metadata_per_index(index_name, query, relevant_history_text, docs)
-    #     all_responses.append(result)
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [
-                    executor.submit(summarize_metadata_per_index, index_name, query, relevant_history_text, docs)
-                    for index_name, docs in metadata_by_index.items() if docs
-                ]
-    all_responses = [f.result() for f in futures]
-
-    combined_summary = summarize_combined_metadata_results(query, all_responses)
-
-    # Add SharePoint reference section
+def summarize_full_metadata(query, relevant_history_text, metadata_by_index, parallel=True):
+    """
+    Summarizes metadata from multiple indexes. Supports parallel or sequential execution.
+    Skips LLM combination if only one index is present.
+    """
+    # Add SharePoint reference section in the end of the response
     reference_links = "\n\n\nMore metadata information can be found from the SharePoint.\n\n**SharePoint Links:**\n"
     for index, values in share_point_urls.items():
         name = values.get("name", "Unknown")
         url = values.get("url", "")
         if url:
             reference_links += f"- [{name}]({url})\n\n"
+
+    index_docs = [(index_name, docs) for index_name, docs in metadata_by_index.items() if docs]
+    if not index_docs:
+        return "Sorry, no relevant metadata found."
+
+    if parallel and len(index_docs) > 1:
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [
+                        executor.submit(summarize_metadata_per_index, idx, query, relevant_history_text, docs)
+                        for idx, docs in index_docs
+                        ]
+            all_responses = [f.result() for f in futures]
+    else:
+        all_responses = [
+        summarize_metadata_per_index(idx, query, relevant_history_text, docs)
+        for idx, docs in index_docs
+        ]
+
+    if len(all_responses) == 1:
+        return f"**Answer:**\n\n{all_responses[0]}\n\n\n\n{reference_links}"  # No need to call LLM to summarize combined results
+
+    combined_summary = summarize_combined_metadata_results(query, all_responses)
 
     return f"**Answer:**\n\n{combined_summary} \n\n\n\n{reference_links}"
 
@@ -1179,6 +1283,9 @@ def combine_subquery_answers(subquery_answer_map: dict, original_query: str) -> 
     f"The following are responses to sub-questions related to the query:\n\n"
     f"{formatted_answers}\n\n"
     "Please combine these answers into a single, coherent response for the user:"
+    "Please ensure the final answer is concise, clear, and directly addresses the original question."
+    "Do not remove or reformat any markdown hyperlinks (e.g., [text](url)).\n"
+    "Preserve all links exactly as they appear.\n"
     )
 
     response = client.chat.completions.create(

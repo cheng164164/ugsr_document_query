@@ -6,11 +6,20 @@ from tiktoken import get_encoding
 from openai import AzureOpenAI
 import pyodbc
 import json
-from datetime import datetime
 import time
+import requests
+from azure.storage.blob import BlobServiceClient, ContentSettings
+from collections import Counter
+import random
+
+
 
 # Tokenizer for GPT-4o (O3 models)
 tokenizer = get_encoding("cl100k_base")
+
+AZURE_BLOB_CONN_STRING = os.getenv("AZURE_BLOB_CONN_STRING")
+AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
 
 # Max token budget for safety (adjustable)
 MAX_TOTAL_TOKENS = 16000
@@ -103,7 +112,7 @@ def truncate_history(history_turns, max_tokens=MAX_INPUT_TOKENS):
     return truncated
 
 
-def get_connection(max_retries=8, delay_seconds=1):
+def get_connection(max_retries=5, delay_seconds=1):
     conn_str = os.environ.get("AZURE_SQL_CONN_STR")
     if not conn_str:
         logging.error("❌ AZURE_SQL_CONN_STR not found in environment settings")
@@ -111,7 +120,7 @@ def get_connection(max_retries=8, delay_seconds=1):
 
     for attempt in range(max_retries):
         try:
-            return pyodbc.connect(conn_str, timeout=30)
+            return pyodbc.connect(conn_str, timeout=50)
         except Exception as e:
             logging.warning(f"DB connection attempt {attempt+1} failed: {e}")
             time.sleep(delay_seconds)
@@ -119,43 +128,155 @@ def get_connection(max_retries=8, delay_seconds=1):
 
 
 def save_chat(user_id, user_name, direction, content, metadata=None):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO ChatHistory (UserId, UserName, Direction, Content, Metadata)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user_id, user_name, direction, content, json.dumps(metadata or {})))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_connection()
+        if not conn:
+            logging.error("❌ Failed to get DB connection in save_chat.")
+            return
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO ChatHistory (UserId, UserName, Direction, Content, Metadata)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, user_name, direction, content, json.dumps(metadata or {})))
+        conn.commit()
+    except Exception as e:
+        logging.error(f"❌ Error saving chat to DB: {e}")
+    finally:
+        try:
+            cursor.close()
+            conn.close()
+        except:
+            pass
 
-def fetch_recent_history(user_id, top_n=10):
+def fetch_recent_history(user_id, top_n=5):
     """
     Fetch recent conversation turns for a user.
     Returns two pipe-separated strings: q_hist and a_hist.
     """
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT TOP (?) Direction, Content
-        FROM ChatHistory
-        WHERE UserId = ?
-        ORDER BY Timestamp_Central ASC   -- ASC so turns stay in chronological order
-    """, (top_n, user_id))
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    conn = None
+    cursor = None
 
-    queries = []
-    answers = []
+    try:
+        conn = get_connection()
+        if not conn:
+            logging.error("❌ Failed to get DB connection in fetch_recent_history.")
+            return "", ""
 
-    for r in rows:
-        if r[0] == "user":
-            queries.append(r[1])
-        elif r[0] == "bot":
-            answers.append(r[1])
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT TOP (?) Direction, Content
+            FROM ChatHistory
+            WHERE UserId = ?
+            ORDER BY Timestamp_Central ASC   -- ASC so turns stay in chronological order
+        """, (top_n, user_id))
+        rows = cursor.fetchall()
 
-    q_hist = " | ".join(queries)
-    a_hist = " | ".join(answers)
+        queries = []
+        answers = []
 
-    return q_hist, a_hist
+        for r in rows:
+            if r[0] == "user":
+                queries.append(r[1])
+            elif r[0] == "bot":
+                answers.append(r[1])
+
+        q_hist = " | ".join(queries)
+        a_hist = " | ".join(answers)
+        return q_hist, a_hist
+
+    except Exception as e:
+        logging.error(f"❌ Error fetching recent history from DB: {e}")
+        return "", ""
+
+    finally:
+        try:
+            cursor.close()
+            conn.close()
+        except:
+            pass
+
+
+def save_json_to_blob(blob_conn_str, container_name, blob_name, data):
+    service_client = BlobServiceClient.from_connection_string(blob_conn_str)
+    try:
+        container_client = service_client.get_container_client(container_name)
+
+        # Ensure container exists — create if not
+        if not container_client.exists():
+            container_client.create_container()
+            logging.info(f"📦 Created missing blob container: '{container_name}'")
+
+        blob_client = container_client.get_blob_client(blob_name)
+
+        blob_client.upload_blob(
+            json.dumps(data, indent=2),
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/json")
+        )
+
+        logging.info(f"✅ Uploaded blob: '{blob_name}' to container: '{container_name}'")
+
+    except Exception as e:
+        logging.error(f"❌ Failed to upload blob '{blob_name}' to container '{container_name}': {e}")
+        raise
+
+
+def load_json_from_blob(blob_conn_str, container_name, blob_name):
+    client = BlobServiceClient.from_connection_string(blob_conn_str)
+    blob = client.get_blob_client(container=container_name, blob=blob_name)
+    if blob.exists():
+        stream = blob.download_blob()
+        return json.loads(stream.readall())
+    return None
+
+
+def build_index_metadata_summary(index_name, sample_size=30):
+    url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{index_name}/docs/search?api-version=2024-07-01"
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": AZURE_SEARCH_KEY
+    }
+
+    select_fields = ["terms", "topics"]
+    payload = {
+        "search": "*",
+        "top": sample_size,
+        "select": ",".join(select_fields),
+        "queryType": "simple",
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code != 200:
+            logging.warning(f"⚠️ Failed to query index '{index_name}': {response.text}")
+            return ""
+        docs = response.json().get("value", [])
+        collected = {f: [] for f in select_fields}
+        for doc in docs:
+            for f in select_fields:
+                val = doc.get(f)
+                if isinstance(val, list):
+                    collected[f].extend(val)
+                elif isinstance(val, str):
+                    collected[f].append(val)
+        summary_parts = []
+        for f, vals in collected.items():
+            if vals:
+                summary_parts.append(f"{f}: {', '.join(vals)}")
+
+        return ". ".join(summary_parts)
+    except Exception as e:
+        logging.error(f"❌ Error building summary for {index_name}: {e}")
+        return ""
+
+# --- Initialize summaries (load or create) ---
+def get_or_build_metadata_summaries(index_names, blob_conn_str, container_name, blob_name):
+    summaries = load_json_from_blob(blob_conn_str, container_name, blob_name)
+    if summaries:
+        return summaries
+
+    logging.info("⚙️ metadata_summaries.json not found. Building new summaries...")
+    summaries = {index: build_index_metadata_summary(index) for index in index_names}
+    save_json_to_blob(blob_conn_str, container_name, blob_name, summaries)
+    logging.info("✅ Saved new metadata summaries to blob.")
+    return summaries
