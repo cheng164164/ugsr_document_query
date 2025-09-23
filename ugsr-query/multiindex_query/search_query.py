@@ -151,6 +151,7 @@ def select_relevant_indexes_via_llm(query, index_metadata_summaries: dict, top_n
             "selected": ["top_index", "optional_second_index_if_close"]
             }
 
+            "ranked" is a list of all indexes with their scores, sorted from highest to lowest score. Even the highest score is 10, all indexes should be included in the "ranked" list. 
             Only include the second index in \"selected\" if its score is at least 70% of the top one.
             Do not return an empty list. Use only the index names provided above.
             Make sure to vary the scores meaningfully. Do not assign all indexes the same score.
@@ -493,33 +494,46 @@ def should_use_metadata_search(query):
     return decision == "metadata"
 
 
-def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI_DEPLOYMENT):
+def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=False):
     """
     Uses LLM to confirm whether the provided context actually answers the user's query.
     Returns a tuple (is_valid, explanation)
     """
-    system_msg = {
-        "role": "system",
-        "content": (
-            "You are a validation agent. Your job is to decide if the provided CONTEXT truly answers the USER QUESTION.\n"
-            "Be strict. If the context uses different terms, systems, or services than the question, reply 'no'.\n"
-            "Only consider exact term matches. \n"
-            "Do not infer or guess intent beyond what the context supports. Do NOT introduce unrelated interpretations of words based on common alternative meanings.\n"
-            "Only consider what is explicitly stated in the context.\n"
-            "Your reply must start with 'yes' or 'no'. Then give a brief reason why.\n"
-            "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about — but DO NOT mention any unrelated definitions or meanings of the words.(eg:, cranes)\n"
-            "For example, if the USER QUESTION mentions 'crane', and the context is about lifting equipment, do not mention bird species.\n"
-            "The purpose of explainaton is also to help guide the user toward a more appropriate query.\n"
-            "If the query partially matches certain keywords in the CONTEXT, prompt the user for clarification, but ONLY based on the meaning used within the CONTEXT.\n"
-            "End by asking: 'Would you like to clarify your question?'"
-        )
-    }
+    if strict_mode: 
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are a validation agent. Your job is to decide if the provided CONTEXT truly answers the USER QUESTION.\n"
+                "Be strict. If the context uses different terms, systems, or services than the question, reply 'no'.\n"
+                "Only consider exact term matches. \n"
+                "Do not infer or guess intent beyond what the context supports. Do NOT introduce unrelated interpretations of words based on common alternative meanings.\n"
+                "Only consider what is explicitly stated in the context.\n"
+                "Your reply must start with 'yes' or 'no'. Then give a brief reason why.\n"
+                "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about — but DO NOT mention any unrelated definitions or meanings of the words.(eg:, cranes)\n"
+                "For example, if the USER QUESTION mentions 'crane', and the context is about lifting equipment, do not mention bird species.\n"
+                "The purpose of explainaton is also to help guide the user toward a more appropriate query.\n"
+                "If the query partially matches certain keywords in the CONTEXT, prompt the user for clarification, but ONLY based on the meaning used within the CONTEXT.\n"
+                "End by asking: 'Would you like to clarify your question?'"
+            )
+        }
+
+    else:
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are a supportive assistant helping users determine if their query can be answered with the available CONTEXT.\n"
+                "Be flexible — if the query is somehow related to the topic of context, or any keyword or phrase partially match, answer 'yes'.\n"
+                "Only when the query is totally unrelated with the topic of context, answer 'no' with a brief explanation and suggest the closest match if possible.\n"
+                "Always try to assist even with keywords or s partial match.\n"
+                "Reply must start with 'yes' or 'no' and end by asking: 'Would you like to clarify your question?'"
+            )
+        }
+
     user_msg = {
         "role": "user",
         "content": (
             f"USER QUESTION: {query}\n\n"
             f"CONTEXT: {context_text}\n\n"
-            f"Does the context fully and specifically answer the question based on term and system alignment?"
         )
     }
     response = client.chat.completions.create(
@@ -1096,7 +1110,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
     return final_answer
 '''
 
-def multi_index_generate_response(query, context, hide_ref_relevance):
+def multi_index_generate_response(query, context, hide_ref_relevance, strict_mode=False):
     """
     Generates an answer using OpenAI's o3-mini model with the top chunks, and includes a formatted reference section
     with relevance explanations based on each document's content, summary, topics, and terms.
@@ -1138,7 +1152,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
     context_str = "\n\n".join(context_texts)
 
     # Run LLM-based validation
-    is_valid, explanation, is_completely_irrelevant = llm_context_guard_check(query, context_str, client)
+    is_valid, explanation, is_completely_irrelevant = llm_context_guard_check(query, context_str, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=strict_mode)
     explanation = ' '.join(explanation.strip().split()[1:])   # cleaning the explanation by deleting the first word - yes or no
     if not is_valid:
         # Try to find semi-relevant documents (e.g., score > 0.3) to suggest contact
@@ -1175,23 +1189,42 @@ def multi_index_generate_response(query, context, hide_ref_relevance):
             main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
         return f"**Answer:**\n\n{main_answer}"
     
-    messages = [
-            {
-                "role": "user",
-                "content": (
-                    f"Answer the following question using the context from the top relevant documents:\n"
-                    f"QUESTION: {query}\n\n"
-                    f"DOCUMENT CHUNKS:\n{context_str}\n\n"
-                    f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
-                    f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
-                    f"If the answer is not clearly stated in the provided context, or you are unsure, respond with: 'Sorry, I cannot help with that.' Then briely expalain reasoning."
-                    f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
-                    f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
-                    f"- Use plain text with no HTML.\n"
-                    f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
-                )
-            }
-        ]
+    if strict_mode:
+        messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Answer the following question using the context from the top relevant documents:\n"
+                        f"QUESTION: {query}\n\n"
+                        f"DOCUMENT CHUNKS:\n{context_str}\n\n"
+                        f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
+                        f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
+                        f"If the answer is not clearly stated in the provided context, or you are unsure, respond with: 'Sorry, I cannot help with that.' Then briely expalain reasoning."
+                        f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
+                        f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
+                        f"- Use plain text with no HTML.\n"
+                        f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
+                    )
+                }
+            ]
+    
+    else:
+        messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Answer the following question using the context from the top relevant documents:\n"
+                        f"QUESTION: {query}\n\n"
+                        f"DOCUMENT CHUNKS:\n{context_str}\n\n"
+                        f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
+                        f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
+                        f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
+                        f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
+                        f"- Use plain text with no HTML.\n"
+                        f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
+                    )
+                }
+            ]
 
     completion = client.chat.completions.create(
             model=AZURE_OPENAI_DEPLOYMENT,
@@ -1284,6 +1317,7 @@ def combine_subquery_answers(subquery_answer_map: dict, original_query: str) -> 
     f"{formatted_answers}\n\n"
     "Please combine these answers into a single, coherent response for the user:"
     "Please ensure the final answer is concise, clear, and directly addresses the original question."
+    "Use clear bullet points or sections. Each bullet point should start with a new line."
     "Do not remove or reformat any markdown hyperlinks (e.g., [text](url)).\n"
     "Preserve all links exactly as they appear.\n"
     )

@@ -25,6 +25,7 @@ dynamic_filtering = feature_flags["dynamic_filtering"]
 metadata_search = feature_flags["metadata_search"]
 use_prev_context = feature_flags["use_prev_context"]
 hide_ref_relevance = feature_flags["hide_ref_relevance"]
+strict_mode = feature_flags.get("strict_mode", False)
 mock_db = feature_flags["mock_db"]
 
 
@@ -62,10 +63,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         cleaned_query = clean_query_for_llm(query)  # Clean query by removing routing keywords if there are any
 
-        # saving user query to DB
+        ## saving user query to DB
         save_chat(user_id, user_name, "user", cleaned_query, metadata)
 
-        # fetching last 10 turns
+        ## fetching last 10 turns
         query_history, answer_history = fetch_recent_history(user_id, 5)
         
         if use_prev_context and (query_history or answer_history):
@@ -78,7 +79,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         sub_queries = decompose_query(rewrited_query)[:4]  # Limit to top 4 sub-queries
         logging.info(f"🔍 Decomposed into {len(sub_queries)} sub-queries.")
         
-        # Step 1: Index filtering
+        ## Step 1: Index filtering
         if len(index_names) == 1:
             target_indexes = index_names
         else:
@@ -142,7 +143,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             
             if not docs:
                 return func.HttpResponse("No relevant documents found.", status_code=404)
-            return multi_index_generate_response(subq, docs, hide_ref_relevance=hide_ref_relevance)
+            return multi_index_generate_response(subq, docs, hide_ref_relevance=hide_ref_relevance, strict_mode=strict_mode)
         
         if len(sub_queries) == 1:
             ai_response = process_content_subquery(sub_queries[0])
