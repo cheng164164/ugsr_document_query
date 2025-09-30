@@ -83,7 +83,10 @@ def remove_hash_number(text):
 
 def delete_existing_log_blob(index_name, connection_string, container="index-logs"):
     try:
-        blob_name = f"{index_name}_log.json"
+        if index_name == 'group_state':
+            blob_name = "group_state.json"
+        else:
+            blob_name = f"{index_name}_log.json"
         blob_client = BlobServiceClient.from_connection_string(connection_string).get_blob_client(
             container=container,
             blob=blob_name

@@ -75,8 +75,8 @@ def create_index(index_name, search_key, search_endpoint):
         index_client.delete_index(index_name)
     fields=[
         SimpleField(name="id", type=SearchFieldDataType.String, key=True, sortable=True, filterable=True, facetable=True),
-        SimpleField(name="filename", type=SearchFieldDataType.String),
         SimpleField(name="url", type=SearchFieldDataType.String),
+        SearchableField(name="filename", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),
         SearchableField(name="title", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),
         SearchableField(name="owner", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),
         SearchableField(name="doc_type", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),

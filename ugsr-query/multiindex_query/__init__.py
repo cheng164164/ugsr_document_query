@@ -28,7 +28,6 @@ hide_ref_relevance = feature_flags["hide_ref_relevance"]
 strict_mode = feature_flags.get("strict_mode", False)
 mock_db = feature_flags["mock_db"]
 
-
 BLOB_CONN_STR = os.getenv("AZURE_BLOB_CONN_STRING")
 INDEX_METADATA_SUMMARIES = None  # global cache
 
@@ -40,8 +39,9 @@ else:
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     global INDEX_METADATA_SUMMARIES
-    if INDEX_METADATA_SUMMARIES is None:
-        INDEX_METADATA_SUMMARIES = get_or_build_metadata_summaries(index_names, 
+    if index_suggestion:
+        if INDEX_METADATA_SUMMARIES is None:
+            INDEX_METADATA_SUMMARIES = get_or_build_metadata_summaries(index_names, 
                                                                    BLOB_CONN_STR, 
                                                                    container_name='index-metadata-summary', 
                                                                    blob_name='metadata_summaries.json')
@@ -53,8 +53,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         user_id = req_body.get("user_id", "unknown")
         user_name = req_body.get("user_name", "anonymous")
         metadata = req_body.get("metadata", {})        
-        # query_history = req_body.get("queryhistory", "")
-        # answer_history = req_body.get("answerhistory", "")
+        query_history = req_body.get("queryhistory", "")
+        answer_history = req_body.get("answerhistory", "")
 
         if not query or query.strip() == "":
             return func.HttpResponse(json.dumps({
@@ -66,8 +66,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         ## saving user query to DB
         save_chat(user_id, user_name, "user", cleaned_query, metadata)
 
-        ## fetching last 10 turns
-        query_history, answer_history = fetch_recent_history(user_id, 5)
+        ## fetching last N turns
+        query_history, answer_history = fetch_recent_history(query_history, answer_history, user_id, 5)
         
         if use_prev_context and (query_history or answer_history):
             history_context = filter_relevant_history(cleaned_query, query_history, answer_history)
@@ -83,9 +83,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         if len(index_names) == 1:
             target_indexes = index_names
         else:
-            target_index = detect_specific_index(query, index_aliases)
-            if target_index:
-                target_indexes = [target_index]
+            target_index_by_keyword = detect_specific_index(query, index_aliases)
+            if target_index_by_keyword:
+                target_indexes = [target_index_by_keyword]
                 logging.info(f"🔍 LLM-suggested indexes by keyword matching: {target_indexes}")
             elif index_suggestion:
                 target_indexes = select_relevant_indexes_via_llm(query, INDEX_METADATA_SUMMARIES, top_n=2)
@@ -95,37 +95,41 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 logging.info(f"📚 No index suggestion, searching all indexes: {target_indexes}")
                 
         ## Step 2: Check if metadata search is needed to gnenerate answer
-        if metadata_search:
-            use_metadata_search_flag = should_use_metadata_search(query)    # use raw query for routing decision
-            if use_metadata_search_flag:
-                if target_indexes:
-                    metadata_by_index = metadata_table_by_index(target_indexes)
-                    logging.info(f"🗂️ Using metadata search for indexes: {target_indexes}")
-                else:
-                    metadata_by_index = metadata_table_by_index(index_names)
+        use_metadata_search_flag = should_use_metadata_search(query)    # use raw query for routing decision
+        if metadata_search and use_metadata_search_flag == "metadata":
+            if target_indexes:
+                doc_metadata_by_index = metadata_table_by_index(target_indexes)
+                logging.info(f"🗂️ Using metadata search for indexes: {target_indexes}")
+            else:
+                doc_metadata_by_index = metadata_table_by_index(index_names)
 
-                def handle_subquery_metadata(subq):
-                    sub_ans = summarize_full_metadata(subq, history_context, metadata_by_index, parallel=parallel_queries)
-                    return sub_ans
+            def handle_subquery_metadata(subq):
+                sub_ans = summarize_full_metadata(subq, history_context, doc_metadata_by_index, parallel=parallel_queries)
+                return sub_ans
                 
-                if len(sub_queries) == 1:
-                    llm_summary = handle_subquery_metadata(sub_queries[0])
+            if len(sub_queries) == 1:
+                llm_summary = handle_subquery_metadata(sub_queries[0])
+            else:
+                if parallel_queries:
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        subquery_results = list(executor.map(handle_subquery_metadata, sub_queries))
                 else:
-                    if parallel_queries:
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            subquery_results = list(executor.map(handle_subquery_metadata, sub_queries))
-                    else:
-                        subquery_results = [handle_subquery_metadata(sq) for sq in sub_queries]
+                    subquery_results = [handle_subquery_metadata(sq) for sq in sub_queries]
 
-                    subquery_answer_map = dict(zip(sub_queries, subquery_results))
-                    llm_summary = combine_subquery_answers(subquery_answer_map, cleaned_query)
+                subquery_answer_map = dict(zip(sub_queries, subquery_results))
+                llm_summary = combine_subquery_answers(subquery_answer_map, cleaned_query)
 
-                try:
-                    save_chat(user_id, user_name, "bot", llm_summary, metadata)
-                except Exception as e:
-                    logging.warning(f"⚠️ Failed to save bot response to DB: {e}")        
+            try:
+                save_chat(user_id, user_name, "bot", llm_summary, metadata)
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to save bot response to DB: {e}")        
         
-                return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
+            return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
+
+        if metadata_search and use_metadata_search_flag == "general":
+            llm_summary = answer_general_question(rewrited_query, index_keyterms_summary=INDEX_METADATA_SUMMARIES)
+            save_chat(user_id, user_name, "bot", llm_summary, metadata)       
+            return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
         ## Step 3: Otherwise, Search all indexes and generate answer
         search_scope = target_indexes if target_indexes else index_names

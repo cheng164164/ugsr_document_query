@@ -31,8 +31,10 @@ feature_flags = {
 ### Chatbot Kimmi
 
 # Define mutli indexes names to search
-index_names = ["business_index",
-               "ugsr_index",
+chatbot_name = "Kimmi"
+
+index_names = ["ugsr_index",
+               "business_index",
                "ehs_index",
                "all_regions_index",
                "policy_center_index"
@@ -71,6 +73,8 @@ index_aliases = {
 
 '''
 ### Chatbot Andi
+chatbot_name = "Andi"
+
 index_names = ["dev_hub_index"
               ]
 

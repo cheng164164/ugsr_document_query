@@ -12,7 +12,7 @@ import json
 import io
 import openpyxl
 import pandas as pd
-from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags
+from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags, chatbot_name
 from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, truncate_history,tokenizer
 
 
@@ -50,13 +50,13 @@ def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "conte
                 if all(w.lower() in route_keywords for w in stripped.split()):
                     continue
                 cleaned.append(stripped)
-            return ". ".join(cleaned).strip()
+            return ".".join(cleaned).strip()
 
         if "|" in raw_query:
             # Process history: split by '|', clean each, rejoin
             segments = [s.strip() for s in raw_query.split("|") if s.strip()]
             cleaned_segments = [clean_segment(seg) for seg in segments if seg]
-            return " | ".join(cleaned_segments)
+            return "|".join(cleaned_segments)
         else:
             # Process single query
             return clean_segment(raw_query)
@@ -470,12 +470,13 @@ def should_use_metadata_search(query):
         {
             "role": "system",
             "content": (
-                "You are a router. Your job is to decide whether a query should be answered by:\n"
-                "- metadata: only if it asks for listing of metadata terms such as filenames, titles, document types, categories, release version, revision date, release data of the documents in the resources etc.\n"
-                "- semantic: if the query asks for listing of terms outside of above metadata terms, or it needs detailed answers from document content.\n"
-                "If the query is ambiguous or general, prefer semantic.\n"
-                "If the query contains words like 'metadata', choose metadata. If the query contains words like 'content', choose semantic.\n"
-                "Only reply with one word: 'metadata' or 'semantic'."
+                f"You are a router. Your job is to decide whether a query should be answered by:\n"
+                f"- metadata: Only if it asks for listing of metadata terms such as filenames, titles, document types, categories, release version, revision date, release data of the documents in the resources etc.\n"
+                f"- semantic: If the query asks for listing of terms outside of above metadata terms, or it needs detailed answers or summaries from document content.\n"
+                f"- general: If the query asks about the general topics, scopes, functionalities, capabilities or logistic questions of the chatbot." 
+                f"For example general questions like 'what can you help with?', 'what is {chatbot_name}', 'how can i use {chatbot_name}?', 'what are the questions that you can answer?'etc.\n"
+                f"If the query contains words like 'metadata', choose metadata. If the query contains words like 'content', choose semantic.\n"
+                f"Only reply with one word: 'metadata' or 'semantic' or 'general'."
             )
         },
         {
@@ -491,7 +492,7 @@ def should_use_metadata_search(query):
 
     decision = response.choices[0].message.content.strip().lower()
     print(f"* Routing decision: {decision} *\n")
-    return decision == "metadata"
+    return decision
 
 
 def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=False):
@@ -778,10 +779,9 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
         "api-key": AZURE_SEARCH_KEY
     }
 
-    keyword_fields = [
-        "title", "doc_type", "doc_category", "doc_function",
-        "terms", "topics", "summary", "content"
-    ]
+    keyword_fields = ["filename", "title", "doc_type", "doc_category", "doc_function",
+                      "terms", "topics", "summary", "content"]
+    
     metadata_filter_fields = ["doc_type", "doc_category", "doc_function"]
     vector_field = "content_embedding"
 
@@ -1218,6 +1218,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance, strict_mod
                         f"DOCUMENT CHUNKS:\n{context_str}\n\n"
                         f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
                         f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
+                        f"If the answer is not clearly stated in the provided context, or you are unsure, briely expalain reasoning and then ask for clarification by:'Would you like to clarify your question?'."
                         f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
                         f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
                         f"- Use plain text with no HTML.\n"
@@ -1327,3 +1328,35 @@ def combine_subquery_answers(subquery_answer_map: dict, original_query: str) -> 
                 messages=[{"role": "user", "content": llm_prompt}],
                 )
     return response.choices[0].message.content.strip()
+
+
+def answer_general_question(query: str, index_keyterms_summary: dict):
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version="2024-12-01-preview"
+    )
+    
+    general_context = (
+    f"You are a helpful assistant that answers general questions about the chatbot whose name is {chatbot_name}.\n"
+    f"You can explain its capabilities, scope, features, supported indexes, and how it works. You answer questions like 'what can you help with?', 'what can you do?', 'what is your purpose?', 'What is {chatbot_name}','which document libraries do you cover?', etc.\n"
+    f"Use the provided index keyterms and topics summary to inform your answers.\n"
+    f"Purpose: This chatbot is designed to assist users by answering questions based on the provided source documents. It serves as a digital assistant for quick reference, clarification, and navigation across various document types including engineering, business, EHS (Environment, Health, and Safety), and policy center content."
+    f"Capabilities: Answer questions based on indexed documents. Extract relevant information from documentation.Summarize content from documents. Locate document titles, and revision dates. Identify responsible groups or design owners. Guide users step-by-step through processes outlined in the documentation."
+    )
+
+    index_summary_context = "\n\nIndex Keyterms and topics Summary:\n" + json.dumps(index_keyterms_summary, indent=2)
+
+    prompt = (
+    f"Context:\n{general_context}\n\n"
+    f"{index_summary_context}\n\n"
+    f"Question: {query}\n\n"
+    "Answer the question clearly and concisely, mentioning relevant topics or indexes if needed."
+    )
+
+    completion = client.chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    summary = completion.choices[0].message.content.strip()
+    return summary

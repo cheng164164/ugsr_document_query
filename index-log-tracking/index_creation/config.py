@@ -23,7 +23,7 @@ ENV_VARS = {
 
 
 ########################################################################################
-
+'''
 #### Chatbot "Kimmi"
 INDEX_CONFIGS = [
     {
@@ -64,7 +64,7 @@ INDEX_CONFIGS = [
 ]
 
 SCHEMA_MAPPING_DICT = {
-    ### Mapping of standard schema -> metadata columns
+    ## Mapping of standard schema -> metadata columns
     "ugsr_index": {
         "Name": "Name",
         "Title": "Title",
@@ -111,12 +111,12 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     },    
 }
-
+'''
 
 
 
 ###############################################################################
-'''
+
 #### Chatbot "Andy"
 INDEX_CONFIGS = [
     {
@@ -140,4 +140,3 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     } 
 }
-'''

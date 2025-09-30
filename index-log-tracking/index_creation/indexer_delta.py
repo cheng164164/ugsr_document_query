@@ -88,8 +88,8 @@ def create_index(index_name: str, search_key: str, search_endpoint: str) -> None
 
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True, sortable=True, filterable=True, facetable=True),
-        SimpleField(name="filename", type=SearchFieldDataType.String, filterable=True, sortable=True, facetable=True),
         SimpleField(name="url", type=SearchFieldDataType.String, filterable=True),
+        SearchableField(name="filename", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),
         SearchableField(name="title", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),
         SearchableField(name="owner", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),
         SearchableField(name="doc_type", type=SearchFieldDataType.String, filterable=True, searchable=True, facetable=True, retrievable=True),

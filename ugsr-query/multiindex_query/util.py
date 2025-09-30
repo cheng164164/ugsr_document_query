@@ -148,7 +148,7 @@ def save_chat(user_id, user_name, direction, content, metadata=None):
         except:
             pass
 
-def fetch_recent_history(user_id, top_n=5):
+def fetch_recent_history(query_history, answer_history, user_id, top_n=5):
     """
     Fetch recent conversation turns for a user.
     Returns two pipe-separated strings: q_hist and a_hist.

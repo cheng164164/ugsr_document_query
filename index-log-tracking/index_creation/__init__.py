@@ -4,7 +4,7 @@ import azure.functions as func
 from dotenv import load_dotenv
 from azure.storage.blob import ContainerClient
 from .config import INDEX_CONFIGS, ENV_VARS, SCHEMA_MAPPING_DICT, enable_delta_updates, enable_grouping
-from .util import set_env_vars, save_group_state, enqueue_init_and_batches, trigger_file_cleanup
+from .util import set_env_vars, save_group_state, enqueue_init_and_batches, trigger_file_cleanup, delete_existing_log_blob
 from azure.storage.queue import QueueClient
 
 
@@ -37,6 +37,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             first_group = all_groups[0]
 
             # Save initial group state to blob
+            delete_existing_log_blob('group_state', connection_string)  # delete existing group state blob
             save_group_state(first_group, all_groups, connection_string)
 
             # Enqueue only first group
