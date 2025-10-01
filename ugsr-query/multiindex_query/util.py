@@ -10,7 +10,8 @@ import time
 import requests
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from collections import Counter
-import random
+from typing import List
+
 
 
 
@@ -94,6 +95,37 @@ def resolve_reference_url(filename: str, original_url: str, supplement_files: di
             if entry.get("file_name", "").strip().lower() == cleaned_filename:
                 return entry.get("reference_link", original_url)
     return original_url
+
+
+def extract_structured_filenames(text: str, normalize: bool = True) -> List[str]:
+    """
+    Extracts all structured file names from the input text based on known patterns.
+    Pattern examples: OP2.105U, OP20.2-F1, POL2.33U, MAN30.100, FRM56.2
+
+    Features:
+    - Matches multiple filenames per input
+    - Supports lowercase or mixed case
+    - Optional normalization (default: lowercase + strip trailing punctuation)
+    
+    Returns:
+        A list of matched filenames (normalized if enabled), or empty list if none found.
+    """
+    # Known pattern:
+    #   - 2+ letters
+    #   - 1+ digits
+    #   - a dot
+    #   - 1+ digits
+    #   - optional [A-Z] or -[A-Z0-9]+
+    pattern = r'\b([A-Z]{2,}[0-9]+\.[0-9]+(?:[A-Z]|-[A-Z0-9]+)?)\b'
+
+    matches = re.findall(pattern, text.upper())
+    
+    if normalize:
+        # Lowercase and strip trailing punctuation like `.`, `,`, etc.
+        return [m.lower().rstrip(".,;:") for m in matches]
+    else:
+        return matches
+
 
 
 def count_tokens(text):
@@ -209,7 +241,7 @@ def save_json_to_blob(blob_conn_str, container_name, blob_name, data):
         blob_client = container_client.get_blob_client(blob_name)
 
         blob_client.upload_blob(
-            json.dumps(data, indent=2),
+            json.dumps(data, indent=2, ensure_ascii=False),
             overwrite=True,
             content_settings=ContentSettings(content_type="application/json")
         )

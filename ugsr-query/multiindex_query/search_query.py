@@ -13,7 +13,7 @@ import io
 import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags, chatbot_name
-from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, truncate_history,tokenizer
+from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, truncate_history,tokenizer, extract_structured_filenames
 
 
 set_env_vars(ENV_VARS)
@@ -785,6 +785,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
     metadata_filter_fields = ["doc_type", "doc_category", "doc_function"]
     vector_field = "content_embedding"
 
+    filename_keywords = extract_structured_filenames(query)
     optimized_query = llm_search_query_optimizer(query, rewrited_query, use_previous_context)
     keywords = extract_keywords(query, optimized_query, debug=feature_flags["debug_mode"]) if keywords_matching else None
     query_em = get_query_embedding(optimized_query)
@@ -803,9 +804,15 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
         if custom_ranking:
             select_fields.append("content_embedding")
 
+        ## Use filename keywords for keyword search if available to enhance chunk retrieval, otherwise use the rewrited query
+        if filename_keywords:
+            search_terms = " ".join(filename_keywords)
+        else:
+            search_terms = rewrited_query.lower()
+        
         url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{index_name}/docs/search?api-version=2024-07-01"
         payload = {
-            "search": rewrited_query.lower(),
+            "search": search_terms,
             "count": True,
             "top": top_k,
             "select": ",".join(select_fields),
@@ -1341,7 +1348,7 @@ def answer_general_question(query: str, index_keyterms_summary: dict):
     f"You are a helpful assistant that answers general questions about the chatbot whose name is {chatbot_name}.\n"
     f"You can explain its capabilities, scope, features, supported indexes, and how it works. You answer questions like 'what can you help with?', 'what can you do?', 'what is your purpose?', 'What is {chatbot_name}','which document libraries do you cover?', etc.\n"
     f"Use the provided index keyterms and topics summary to inform your answers.\n"
-    f"Purpose: This chatbot is designed to assist users by answering questions based on the provided source documents. It serves as a digital assistant for quick reference, clarification, and navigation across various document types including engineering, business, EHS (Environment, Health, and Safety), and policy center content."
+    f"Purpose: This chatbot is designed to assist users by answering questions based on the provided source documents. It serves as a digital assistant for quick reference, clarification, and navigation across various document types."
     f"Capabilities: Answer questions based on indexed documents. Extract relevant information from documentation.Summarize content from documents. Locate document titles, and revision dates. Identify responsible groups or design owners. Guide users step-by-step through processes outlined in the documentation."
     )
 

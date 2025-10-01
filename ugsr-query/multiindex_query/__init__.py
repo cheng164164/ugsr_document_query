@@ -39,9 +39,8 @@ else:
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     global INDEX_METADATA_SUMMARIES
-    if index_suggestion:
-        if INDEX_METADATA_SUMMARIES is None:
-            INDEX_METADATA_SUMMARIES = get_or_build_metadata_summaries(index_names, 
+    if INDEX_METADATA_SUMMARIES is None:
+        INDEX_METADATA_SUMMARIES = get_or_build_metadata_summaries(index_names, 
                                                                    BLOB_CONN_STR, 
                                                                    container_name='index-metadata-summary', 
                                                                    blob_name='metadata_summaries.json')
@@ -126,7 +125,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
             return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
-        if metadata_search and use_metadata_search_flag == "general":
+        if use_metadata_search_flag == "general":
             llm_summary = answer_general_question(rewrited_query, index_keyterms_summary=INDEX_METADATA_SUMMARIES)
             save_chat(user_id, user_name, "bot", llm_summary, metadata)       
             return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
