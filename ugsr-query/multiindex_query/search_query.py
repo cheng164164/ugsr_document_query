@@ -269,14 +269,14 @@ def rewrite_query_with_history(current_query, relevant_history_text):
         "- Relevant prior conversation turns (user and assistant)\n"
         "The assistant may have previously asked the user to clarify their question,\n"
         "so the latest user message may be a direct clarification of an earlier vague or incomplete query.\n"
-        "If you found the latest user message is a new query/topic which is not about clarification or irrelevant to prior conversation turns, then ignore the coversation history."
-        "Your task is to synthesize all of this context into a single rewritten query that:\n"
+        "If you found the latest user message is a new query/topic which is not about clarification or irrelevant to prior conversation turns, then simply skip rewriting and return the original query exactly word by word."
+        "Otherwise, your task is to synthesize all of this context into a single rewritten query that:\n"
         "- Clearly expresses the user's intended question\n"
         "- Resolves any vague references (e.g., 'this', 'it', 'that', 'these', 'those', 'they', 'the one')\n"
         "- Incorporates relevant details and clarifications from the current and previous turns\n"
         "- Is suitable for retrieval or search\n"
         "Do NOT answer the question or include chat history in the output.\n"
-        "Only return the rewritten query."
+        "Only return the rewritten query or orignal query."
     )
 
     user_prompt = (
@@ -789,6 +789,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
     optimized_query = llm_search_query_optimizer(query, rewrited_query, use_previous_context)
     keywords = extract_keywords(query, optimized_query, debug=feature_flags["debug_mode"]) if keywords_matching else None
     query_em = get_query_embedding(optimized_query)
+    query_em = get_query_embedding(query)
 
     all_results = []
     all_content = []
@@ -865,7 +866,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
                 index_content.append(doc.get("content", "").lower() + " " + doc.get("summary", "").lower())
 
             sorted_hits = sorted(hits, key=lambda x: x.get("_final_score", 0), reverse=True)
-            debug_data = sorted_hits[:3]
+            debug_data = sorted_hits[:]
         else:
             logging.warning(f"❌ Search failed on {index_name}: {response.status_code} — {response.text}")
 

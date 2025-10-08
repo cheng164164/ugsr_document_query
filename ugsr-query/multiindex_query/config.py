@@ -1,10 +1,10 @@
 ##################### General Settings ######################################
 ENV_VARS = {
     "AZURE_BLOB_CONN_STRING": "<your_blob_connection_string>",
-    "AZURE_OPENAI_KEY": "<your_openai_key>",
-    "AZURE_OPENAI_DEPLOYMENT_NAME": "<your_openai_deployment_name>",
+    "AZURE_OPENAI_API_KEY": "<your_openai_api_key>",
+    "AZURE_OPENAI_DEPLOYMENT": "<your_openai_deployment_name>",
     "AZURE_OPENAI_ENDPOINT": "<your_openai_endpoint>",
-    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "<your_openai_embedding_deployment>",
+    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "<your_openai_embedding_deployment_name>",
     "AZURE_SEARCH_ENDPOINT": "<your_search_endpoint>",
     "AZURE_SEARCH_KEY": "<your_search_key>",
     "AZURE_SEARCH_INDEX": "<your_search_index_name>",
