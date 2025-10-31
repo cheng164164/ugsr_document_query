@@ -1210,7 +1210,6 @@ def multi_index_generate_response(query, context, hide_ref_relevance, strict_mod
                         f"If the answer is not clearly stated in the provided context, or you are unsure, respond with: 'Sorry, I cannot help with that.' Then briely expalain reasoning."
                         f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
                         f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
-                        f"- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink. For example: [Development Hub](https://example.com)."                        
                         f"- Use plain text with no HTML.\n"
                         f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
                     )
@@ -1230,7 +1229,6 @@ def multi_index_generate_response(query, context, hide_ref_relevance, strict_mod
                         f"If the answer is not clearly stated in the provided context, or you are unsure, briely expalain reasoning and then ask for clarification by:'Would you like to clarify your question?'."
                         f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
                         f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
-                        f"- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink. For example: [Development Hub](https://example.com)."                        
                         f"- Use plain text with no HTML.\n"
                         f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
                     )
