@@ -25,6 +25,7 @@ dynamic_filtering = feature_flags["dynamic_filtering"]
 metadata_search = feature_flags["metadata_search"]
 use_prev_context = feature_flags["use_prev_context"]
 hide_ref_relevance = feature_flags["hide_ref_relevance"]
+hide_ref_contact = feature_flags['hide_ref_contact']
 strict_mode = feature_flags.get("strict_mode", False)
 mock_db = feature_flags["mock_db"]
 
@@ -146,7 +147,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             
             if not docs:
                 return func.HttpResponse("No relevant documents found.", status_code=404)
-            return multi_index_generate_response(subq, docs, hide_ref_relevance=hide_ref_relevance, strict_mode=strict_mode)
+            return multi_index_generate_response(subq, docs, hide_ref_relevance=hide_ref_relevance, hide_ref_contact=hide_ref_contact, strict_mode=strict_mode)
         
         if len(sub_queries) == 1:
             ai_response = process_content_subquery(sub_queries[0])

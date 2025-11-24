@@ -23,6 +23,7 @@ feature_flags = {
     "hide_ref_relevance": True,    # Set to True to hide relevance explanation in the reference section
     "dynamic_filtering": False,   # Set to True to enable dynamic metadata filtering based on query keywords
     "keywords_matching": False,   # Set to True to enable keyword matching check and warning 
+    "hide_ref_contact": False,    # Set to True to hide reference contact
     "strict_mode": False,  # Set to True to enable strict model for ensuring query is explicitly answered by the retrieved context 
     "mock_db": False    # Set to True to use mock DB functions for testing without actual DB connection
 }
@@ -89,7 +90,14 @@ share_point_urls = {
 }
 
 # Supplementary files in blob storage for each index
-supplement_files = {"dev_hub_index": [{'file_name': "Change_Management_HomePage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Change-Management.aspx"}]
+supplement_files = {"dev_hub_index": [{'file_name': "Change_Management_HomePage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Change-Management.aspx"},
+                                    {'file_name': "Career Planning Homepage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Your-Career.aspx"},
+                                    {'file_name': "Development Hub Homepage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270"},
+                                    {'file_name': "Komatsu internal job candidate collection.pdf",'reference_link': "https://www.linkedin.com/learning/collections/enterprise/1~AAAAAAAjyzo=1979017?trk=share_ent_collection_url&shareId=qhfLNaPLQT2v0i0piOxY9A%3D%3D&accountId=2345786&u=2345786&success=true&authUUID=n6sdtoCXREC9D7rWZ3z9yA%3D%3D"},
+                                    {'file_name': "Leadership Development Homepage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Leadership-Development.aspx"},
+                                    {'file_name': "Performance and Goals Homepage.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/SitePages/Performance-and-Goals.aspx"},
+                                    {'file_name': "Welcome to the Development Hub_video.pdf",'reference_link': "https://globalkomatsu.sharepoint.com/sites/NAGMUSGR00270/_layouts/15/stream.aspx?sw=bypass&bypassReason=abandoned&id=%2Fsites%2FNAGMUSGR00270%2FAll+Documents%2FWelcome+to+the+Development+Hub.mp4&startedResponseCatch=true"}
+                                    ]
 }
 
 # Aliases for each index to catch user queries that mention library/index by name

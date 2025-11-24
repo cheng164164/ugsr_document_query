@@ -13,7 +13,7 @@ import io
 import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags, chatbot_name
-from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, truncate_history,tokenizer, extract_structured_filenames
+from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, resolve_reference_name, truncate_history,tokenizer, extract_structured_filenames
 
 
 set_env_vars(ENV_VARS)
@@ -498,7 +498,7 @@ def should_use_metadata_search(query):
 def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=False):
     """
     Uses LLM to confirm whether the provided context actually answers the user's query.
-    Returns a tuple (is_valid, explanation)
+    Returns a tuple (is_valid, explanation, is_completely_irrelevant)
     """
     if strict_mode: 
         system_msg = {
@@ -1118,33 +1118,33 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
     return final_answer
 '''
 
-def multi_index_generate_response(query, context, hide_ref_relevance, strict_mode=False):
-    """
-    Generates an answer using OpenAI's o3-mini model with the top chunks, and includes a formatted reference section
-    with relevance explanations based on each document's content, summary, topics, and terms.
-    """
+def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_contact, strict_mode=False):
+    from collections import OrderedDict
+    import re
+
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_API_KEY,
         api_version="2024-12-01-preview"
     )
 
-    # # Handle None supplement_files
-    # if supplement_files is None:
-    #     supplement_files = {}
-
     warning_msg, top_chunks = context
     context_texts = []
-    doc_groups  = {}
+    doc_groups = OrderedDict()
+    tag_lookup = {}  # Maps doc tag to filename
 
-    for doc in top_chunks:
+    for idx, doc in enumerate(top_chunks):
+        tag = f"Doc{idx + 1}"
         filename = doc.get("filename", "N/A")
         content = doc.get("content", "")
         score = doc.get('_final_score', 0)
-        context_texts.append(f"[{filename}] {content}")
+        context_texts.append(f"[{tag}] {content}")
+        tag_lookup[tag] = filename
+
         url = resolve_reference_url(filename, doc.get("url", "N/A"), supplement_files)
-        if filename not in doc_groups :
-            doc_groups [filename] = {
+
+        if filename not in doc_groups:
+            doc_groups[filename] = {
                 "document_name": filename,
                 "url": url,
                 "key_contact": doc.get("owner", "N/A"),
@@ -1152,120 +1152,117 @@ def multi_index_generate_response(query, context, hide_ref_relevance, strict_mod
                 "key_terms": doc.get("terms", ""),
                 "summary": doc.get("summary", ""),
                 "scores": [score],
+                "tags": [tag],
             }
         else:
-            doc_groups [filename]["scores"].append(score)
-    
-    # --- Build context string for LLM to generate main answer ---
+            doc_groups[filename]["scores"].append(score)
+            doc_groups[filename]["tags"].append(tag)
+
     context_str = "\n\n".join(context_texts)
 
-    # Run LLM-based validation
-    is_valid, explanation, is_completely_irrelevant = llm_context_guard_check(query, context_str, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=strict_mode)
-    explanation = ' '.join(explanation.strip().split()[1:])   # cleaning the explanation by deleting the first word - yes or no
+    is_valid, explanation, is_completely_irrelevant = llm_context_guard_check(
+        query, context_str, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=strict_mode
+    )
+    explanation = ' '.join(explanation.strip().split()[1:])
+
     if not is_valid:
-        # Try to find semi-relevant documents (e.g., score > 0.3) to suggest contact
         main_answer = (
-                        "Sorry, I cannot help with that. The provided documents do not clearly explain the requested information.\n"
-                        f"(Reason: {explanation})"
+            "Sorry, I cannot help with that. The provided documents do not clearly explain the requested information.\n"
+            f"(Reason: {explanation})"
         )
 
         if not is_completely_irrelevant and top_chunks:
             top3 = top_chunks[:3]
             file_votes = {}
-
             for chunk in top3:
                 filename = chunk.get('filename', 'N/A')
                 if filename not in file_votes:
                     file_votes[filename] = {'count': 0, 'chunk': chunk}
                 file_votes[filename]['count'] += 1
 
-            # Determine which document has the most votes
             most_common_doc = max(file_votes.values(), key=lambda x: x['count'])['chunk']
             most_common_filename = most_common_doc.get("filename", "N/A")
-            url_value = resolve_reference_url( most_common_filename,
-                                               (most_common_doc.get("url") or "").split(";")[0].strip(),
-                                               supplement_files
-                                            )
-            main_answer += (
-                "\n\n---\n Please refer to the following document for helpful information, and contact the listed person for further inquiries:\n\n"
-                "**Document**:"
-                f"  [{title_case_filename(most_common_filename)}]({url_value})\n\n"
-                f"**Key Contact**: {title_case_name(most_common_doc.get('owner', 'N/A'))}"
-            )
-        
+            resolved_filename = resolve_reference_name(most_common_filename, supplement_files)
+            url_value = resolve_reference_url(most_common_filename, (most_common_doc.get("url") or "").split(";")[0].strip(), supplement_files)
+
+            main_answer += ("\n\n---\n Please refer to the following document for helpful information.")
+            main_answer += f"\n\n**Resource**: [{title_case_filename(resolved_filename)}]({url_value})"
+            if not hide_ref_contact:
+                main_answer += f"\n\n**Key Contact**: {title_case_name(most_common_doc.get('owner', 'N/A'))}"
+
         if warning_msg:
             main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
         return f"**Answer:**\n\n{main_answer}"
-    
+
+    instructions = [
+        "- Be concise",
+        "- Use only information from the documents. Do not generate answers that don't use the source documents provided.",
+    ]
+
     if strict_mode:
-        messages = [
-                {
-                    "role": "user",
-                    "content": (
-                        f"Answer the following question using the context from the top relevant documents:\n"
-                        f"QUESTION: {query}\n\n"
-                        f"DOCUMENT CHUNKS:\n{context_str}\n\n"
-                        f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
-                        f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
-                        f"If the answer is not clearly stated in the provided context, or you are unsure, respond with: 'Sorry, I cannot help with that.' Then briely expalain reasoning."
-                        f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
-                        f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
-                        f"- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink. For example: [Development Hub](https://example.com)."                        
-                        f"- Use plain text with no HTML.\n"
-                        f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
-                    )
-                }
-            ]
-    
+        instructions.append("- If insufficient information or not sure about the answer, respond with: 'Sorry, I cannot help with that.' Then briefly explain reasoning.")
     else:
-        messages = [
-                {
-                    "role": "user",
-                    "content": (
-                        f"Answer the following question using the context from the top relevant documents:\n"
-                        f"QUESTION: {query}\n\n"
-                        f"DOCUMENT CHUNKS:\n{context_str}\n\n"
-                        f"INSTRUCTIONS:\n- Be concise\n- Use only information from the documents. Do not generate answers that don't use the source documents provided.\n"
-                        f"- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it. \n"
-                        f"If the answer is not clearly stated in the provided context, or you are unsure, briely expalain reasoning and then ask for clarification by:'Would you like to clarify your question?'."
-                        f"- You may be provided with multiple sources. Read all sources and find the most relavant information to best answer user question.\n"
-                        f"- If your answer describes a process, include step-by-step instructions and seperate each step by bullet symbol.\n"
-                        f"- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink. For example: [Development Hub](https://example.com)."                        
-                        f"- Use plain text with no HTML.\n"
-                        f"- Separate sections and lists (when encountering bullet symbol) with line breaks."
-                    )
-                }
-            ]
+        instructions.append("- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it.\nIf the answer is not clearly stated in the provided context, or you are unsure, briefly explain reasoning and then ask: 'Would you like to clarify your question?'")
+
+    instructions.extend([
+        "- Tag referenced content using the format (Doc1), (Doc2), etc. Only use this format when referencing documents.",
+        "- If referencing multiple documents, combine them like this: (Doc1, Doc3, Doc4), always use parentheses to enclose the references. Strictly follow this format.",
+        "- Do NOT use any other format like 'See Doc1', 'as shown in Doc2', 'in Doc1' or simply reference without parentheses.",
+        "- If your answer describes a process, include step-by-step instructions using bullet symbols.",
+        "- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink.",
+        "- Use plain text with no HTML.",
+        "- Separate sections and lists with line breaks."
+    ])
+
+    full_prompt = (
+        f"Answer the following question using the context from the top relevant documents.\n"
+        f"QUESTION: {query}\n\n"
+        f"DOCUMENT CHUNKS:\n{context_str}\n\n"
+        f"INSTRUCTIONS:\n" + "\n".join(instructions)
+    )
+
+    messages = [{"role": "user", "content": full_prompt}]
 
     completion = client.chat.completions.create(
-            model=AZURE_OPENAI_DEPLOYMENT,
-            messages=messages
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=messages
     )
 
     main_answer = completion.choices[0].message.content.strip()
-    
+
     if warning_msg:
-            main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
+        main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
 
-    # --- Build reference section ---
+    # Identify which tags were referenced
+    referenced_tags = set(tag for tag in tag_lookup if tag in main_answer)
+    referenced_files = {tag_lookup[tag] for tag in referenced_tags}
+
+    # Clean tag references from main_answer
+    main_answer = re.sub(r"\(Doc\d+(?:\s*,\s*Doc\d+)*\)", "", main_answer)
+    main_answer = re.sub(r"\n\s*\n", "\n\n", main_answer).strip()
+
+    # Build reference section, max 3
     reference_text = "\n\n**References:**\n"
-
-    for doc in list(doc_groups.values())[:3]:
-        document_name = title_case_filename(doc['document_name'])
-        url_value = resolve_reference_url(doc['document_name'], 
-                                          (doc.get("url") or "").split(";")[0].strip(), 
-                                          supplement_files)
+    ref_count = 0
+    for filename, doc in doc_groups.items():
+        if filename not in referenced_files:
+            continue
+        if ref_count >= 3:
+            break
+        ref_count += 1
         
-        key_contact = title_case_name(doc['key_contact']) 
+        document_name = title_case_filename(resolve_reference_name(doc['document_name'], supplement_files))
+        url_value = resolve_reference_url(doc['document_name'], (doc.get("url") or "").split(";")[0].strip(), supplement_files)
+
+        reference_text += f"\n---\n**Resource**: [{document_name}]({url_value})\n\n"
+
+        if not hide_ref_contact:
+            key_contact = title_case_name(doc['key_contact'])
+            reference_text += f"**Key Contact**: {key_contact}\n\n"
+
         if hide_ref_relevance:
-            reference_text += (
-                f"\n---\n"
-                f"**Document**: [{document_name}]({url_value})\n\n"
-                f"**Key Contact**: {key_contact}\n\n"
-            )
             continue
 
-        # Build a focused relevance summary prompt
         relevance_context = (
             f"QUESTION: {query}\n\n"
             f"DOCUMENT SUMMARY: {doc['summary']}\n\n"
@@ -1276,15 +1273,10 @@ def multi_index_generate_response(query, context, hide_ref_relevance, strict_mod
         relevance_prompt = [
             {
                 "role": "user",
-                
                 "content": (
-                    f"Be concise, Summarize in less than 100 words why this document is relevant to the question below, "
-                    f"based only on the document's summary, key topics, and key terms. "
-                    f"Use bullet points for clarity.\n"
-                    f"Do not include HTML, markdown, or field labels.\n"
-                    f"Each bullet point should start with a new line."
-                    f"Do NOT list the raw fields; only give a clean, concise explanation.\n\n"
-                    f"{relevance_context}"
+                    f"Be concise. Summarize in less than 100 words why this document is relevant to the question below, "
+                    f"based only on the document's summary, key topics, and key terms.\n"
+                    f"Use bullet points for clarity. Do NOT use field labels or markdown.\n\n{relevance_context}"
                 )
             }
         ]
@@ -1295,17 +1287,10 @@ def multi_index_generate_response(query, context, hide_ref_relevance, strict_mod
         )
 
         relevance_summary = rel_response.choices[0].message.content.strip()
-        avg_score = round(sum(doc["scores"]) / len(doc["scores"]), 2)
-
-        reference_text += (
-                f"\n---\n"
-                f"**Document**: [{document_name}]({url_value})\n\n"
-                f"**Key Contact**: {key_contact}\n\n"
-                # f" **Similarity Score**: {avg_score}\n\n"
-                f"**Relevance**: {relevance_summary}\n\n"
-        )
+        reference_text += f"**Relevance**: {relevance_summary}\n\n"
 
     return f"**Answer:**\n\n{main_answer}{reference_text}"
+
 
 
 def combine_subquery_answers(subquery_answer_map: dict, original_query: str) -> str:

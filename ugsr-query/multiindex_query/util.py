@@ -97,6 +97,20 @@ def resolve_reference_url(filename: str, original_url: str, supplement_files: di
     return original_url
 
 
+def resolve_reference_name(filename: str, supplement_files: dict) -> str:
+    """
+    Returns a reference name for the document.
+    If the filename is listed in supplement_files, return the reference file name without file extension.
+    Otherwise, return the original filename.
+    """
+    cleaned_filename = filename.strip().lower()
+    for index_docs in supplement_files.values():
+        for entry in index_docs:
+            if entry.get("file_name", "").strip().lower() == cleaned_filename:
+                return os.path.splitext(filename)[0]
+    return filename
+
+
 def extract_structured_filenames(text: str, normalize: bool = True) -> List[str]:
     """
     Extracts all structured file names from the input text based on known patterns.
