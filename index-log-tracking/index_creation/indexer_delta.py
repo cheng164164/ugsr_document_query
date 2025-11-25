@@ -28,6 +28,8 @@ from azure.search.documents.indexes.models import (
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
 from openai import AzureOpenAI, RateLimitError
+from pytz import timezone
+
 
 
 def read_metadata_from_blob(connection_string, container_name, blob_name):
@@ -506,6 +508,8 @@ def data_chunk_embed_upload_batch(
 ) -> pd.DataFrame:
     """Process a slice of blobs with delta detection and synchronize changes to Azure AI Search (upserts and deletes)."""
 
+    central_time = datetime.now(timezone("US/Central")).strftime("%Y-%m-%d %H:%M:%S")
+
     if "version" not in metadata_df.columns:
         metadata_df["version"] = None
     if "publish date" not in metadata_df.columns:
@@ -612,14 +616,28 @@ def data_chunk_embed_upload_batch(
         delete_docs_by_ids(search_client, deletes)
 
     results = {
-    "metadata_df": metadata_df,
-    "uploaded_chunks": len(upserts),
-    "deleted_chunks": len(deletes),
-    "skipped_files": len(current_batch) - (len(upserts_by_file) + len(failed_files)),
-    "added_files": len(added_files),
-    "deleted_files": len(deleted_files),
-    "modified_files": len(modified_files),
-    "failed_files": len(failed_files),
+        "timestamp_central": central_time,
+        "metadata_df": metadata_df,
+        "uploaded_chunks": len(upserts),
+        "deleted_chunks": len(deletes),
+        "skipped_files": len(current_batch) - (len(upserts_by_file) + len(failed_files)),
+
+        "added_files": {
+            "count": len(added_files),
+            "files": sorted(added_files)
+        },
+        "deleted_files": {
+            "count": len(deleted_files),
+            "files": sorted(deleted_files)
+        },
+        "modified_files": {
+            "count": len(modified_files),
+            "files": sorted(modified_files)
+        },
+        "failed_files": {
+            "count": len(failed_files),
+            "files": sorted(failed_files)
+        }
     }
 
     return results

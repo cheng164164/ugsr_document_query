@@ -445,6 +445,9 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
     from azure.storage.blob import ContainerClient
     from azure.core.credentials import AzureKeyCredential
     from azure.search.documents import SearchClient
+    from pytz import timezone
+
+    central_time = datetime.now(timezone("US/Central")).strftime("%Y-%m-%d %H:%M:%S")
 
     # Ensure version and publish_date columns exist
     if "version" not in metadata_df.columns:
@@ -575,13 +578,26 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
     print(f" 🎉 Finished uploading [Index: {index_name}] batch {batch_number + 1} ({len(indexed_docs)} chunks)")
 
     results = {
-                "metadata_df": metadata_df,
-                "uploaded_chunks": len(indexed_docs),
-                "deleted_chunks": 0,
-                "skipped_files": 0,
-                "added_files": len(added_files),
-                "deleted_files": 0,
-                "modified_files": 0,
-                "failed_files": len(failed_files),
-              }
+        "timestamp_central": central_time,
+        "metadata_df": metadata_df,
+        "uploaded_chunks": len(indexed_docs),
+        "deleted_chunks": 0,
+        "skipped_files": 0,
+        "added_files": {
+            "count": len(added_files),
+            "files": sorted(added_files)
+        },
+        "deleted_files": {
+            "count": 0,
+            "files": []
+        },
+        "modified_files": {
+            "count": 0,
+            "files": []
+        },
+        "failed_files": {
+            "count": len(failed_files),
+            "files": sorted(failed_files)
+        }
+    }
     return results

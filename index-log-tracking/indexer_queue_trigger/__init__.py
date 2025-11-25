@@ -203,6 +203,12 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
         )
 
         # ✅ Step 3: Mark batch as uploaded (success)
+
+        # 📝 Extract detailed file info
+        added_info = result.get("added_files", {})
+        deleted_info = result.get("deleted_files", {})
+        modified_info = result.get("modified_files", {})
+        failed_info = result.get("failed_files", {})
         update_batch_log(
             config["index_name"],
             batch_number,
@@ -210,13 +216,22 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
             connection_string=connection_string,
             container="index-logs",
             extra_fields={
+                "timestamp_central": result.get("timestamp_central",''),
                 "uploaded_chunks": result.get("uploaded_chunks", 0),
                 "deleted_chunks": result.get("deleted_chunks", 0),
                 "skipped_files": result.get("skipped_files", 0),
-                "added_files": result.get("added_files", 0),
-                "deleted_files": result.get("deleted_files", 0),
-                "modified_files": result.get("modified_files", 0),
-                "failed_files": result.get("failed_files", 0),
+                
+                "added_files_count": added_info.get("count", 0),
+                "added_files_list": added_info.get("files", []),
+
+                "deleted_files_count": deleted_info.get("count", 0),
+                "deleted_files_list": deleted_info.get("files", []),
+
+                "modified_files_count": modified_info.get("count", 0),
+                "modified_files_list": modified_info.get("files", []),
+
+                "failed_files_count": failed_info.get("count", 0),
+                "failed_files_list": failed_info.get("files", []),
             }
         )
 
