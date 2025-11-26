@@ -4,7 +4,7 @@ import os
 
 # Global control flags
 enable_grouping = os.getenv("ENABLE_GROUPING", "true").lower() == "true"
-enable_delta_updates = os.getenv("ENABLE_DELTA_UPDATES", "true").lower() == "true"
+enable_delta_updates = os.getenv("ENABLE_DELTA_UPDATES", "true").lower() == "false"
 
 ENV_VARS = {
     "AZURE_BLOB_CONN_STRING": "<your blob connect string>",
@@ -120,7 +120,7 @@ SCHEMA_MAPPING_DICT = {
 #### Chatbot "Andy"
 INDEX_CONFIGS = [
     {
-        "index_name": "dev_hub_index",
+        "index_name": "dev_hub_index_v2",
         "metadata_container": "development-hub-documents-metadata",
         "metadata_blob": "auto_extraction/development_hub_metadata_new.csv",
         "document_container": "development-hub-documents",
@@ -130,7 +130,7 @@ INDEX_CONFIGS = [
 
 SCHEMA_MAPPING_DICT = {
     ### Mapping of standard schema -> metadata columns
-    "dev_hub_index": {
+    "dev_hub_index_v2": {
         "Name": "Name",
         "Title": None,
         "Doc Type": None,
@@ -140,3 +140,32 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     } 
 }
+
+
+'''
+###############################################################################
+#### Chatbot "LDGN"
+INDEX_CONFIGS = [
+    {
+        "index_name": "ldgn_index",
+        "metadata_container": "",
+        "metadata_blob": "",
+        "document_container": "ldgn-documents",
+        "group": 1,
+        "is_xml": True
+    },
+]
+
+SCHEMA_MAPPING_DICT = {
+    ### Mapping of standard schema -> metadata columns
+    "ldgn_index": {
+        "Name": None,
+        "Title": None,
+        "Doc Type": None,
+        "Document Owner(s)": None,
+        "Doc Category": None,
+        "Function": None, 
+        "url": None 
+    } 
+}
+'''

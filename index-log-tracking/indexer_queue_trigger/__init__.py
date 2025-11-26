@@ -15,15 +15,14 @@ from azure.storage.blob import ContainerClient
 from datetime import datetime
 from azure.storage.queue import QueueClient
 from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+from importlib import import_module
+from azure.search.documents import SearchClient
+from azure.core.credentials import AzureKeyCredential
+
 
 
 logging.info("🔄 indexer_queue_trigger module loaded.")
 set_env_vars(ENV_VARS)
-
-if enable_delta_updates:
-    from index_creation.indexer_delta import *
-else:
-    from index_creation.indexer import *
 
 connection_string = os.getenv('AZURE_BLOB_CONN_STRING')
 azure_doc_intell_endpoint = os.getenv('AZURE_DOC_INTELL_ENDPOINT')
@@ -36,6 +35,17 @@ search_key = os.getenv("AZURE_SEARCH_KEY")
 azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 azure_oai_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
 azure_oai_embedding_deployment = os.getenv('AZURE_EMBEDDING_DEPLOYMENT_NAME', 'text-embedding-3-small')
+
+
+def import_indexer_module(config):
+    is_xml = config.get("is_xml", False)
+    if is_xml:
+        enable_delta_updates = True
+        return import_module("index_creation.indexer_delta_xml")
+    elif enable_delta_updates:
+        return import_module("index_creation.indexer_delta")
+    else:
+        return import_module("index_creation.indexer")
 
 
 def main(msg: func.QueueMessage) -> None:
@@ -56,10 +66,12 @@ def main(msg: func.QueueMessage) -> None:
             logging.warning(f"⚠️ No config found for index: {index_name}")
             return
 
+        indexer = import_indexer_module(config)
+
         if action == "init_index":
             delete_existing_log_blob(index_name, connection_string)
             # Re-create the index if it already exists
-            create_index(index_name, search_key, search_endpoint)
+            indexer.create_index(index_name, search_key, search_endpoint)
             save_index_log(index_name, {
             "index_name": index_name,
             "group": config.get("group"),
@@ -147,7 +159,7 @@ def main(msg: func.QueueMessage) -> None:
                         elif enable_delta_updates:
                             logging.info("🧼 Triggering cleanup after final group")
                             search_client = SearchClient(endpoint=search_endpoint, index_name=index_name, credential=AzureKeyCredential(search_key))
-                            clean_file_level_deletes_after_batch(connection_string, config['document_container'], search_client)
+                            indexer.clean_file_level_deletes_after_batch(connection_string, config['document_container'], search_client)
 
         else:
             logging.warning(f"⚠️ Unknown action: {action}")
@@ -159,6 +171,8 @@ def main(msg: func.QueueMessage) -> None:
 
 def run_index_job(config, log, batch_number, batch_size, total_batches):
     set_env_vars(ENV_VARS=ENV_VARS)
+
+    indexer = import_indexer_module(config)
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     embedder = AzureOpenAIEmbeddings(
         azure_deployment=azure_oai_embedding_deployment,
@@ -172,8 +186,11 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
         api_version=azure_openai_api_version
     )
 
-    metadata_df = read_metadata_from_blob(connection_string, config['metadata_container'], config['metadata_blob'])
-    metadata_df = clean_metadata(metadata_df, SCHEMA_MAPPING_DICT, config['index_name'])
+    if hasattr(indexer, "read_metadata_from_blob"):
+        metadata_df = indexer.read_metadata_from_blob(connection_string, config["metadata_container"], config["metadata_blob"])
+        metadata_df = clean_metadata(metadata_df, SCHEMA_MAPPING_DICT, config["index_name"])
+    else:
+        metadata_df = None
 
     container_client = ContainerClient.from_connection_string(connection_string, config['document_container'])
     blob_list = [b.name for b in container_client.list_blobs() if b.name != "index_log.csv"]
@@ -194,7 +211,7 @@ def run_index_job(config, log, batch_number, batch_size, total_batches):
 
     try:
         # ⚙️ Step 2: Run the actual indexing process
-        result = data_chunk_embed_upload_batch(
+        result = indexer.data_chunk_embed_upload_batch(
             splitter, embedder, embedder_client, connection_string, config['document_container'], metadata_df,
             config['metadata_container'], config['metadata_blob'], config['index_name'],
             azure_doc_intell_endpoint, azure_doc_intell_key, azure_oai_endpoint, azure_oai_key, azure_openai_api_version,

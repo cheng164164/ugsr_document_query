@@ -505,7 +505,7 @@ def data_chunk_embed_upload_batch(
     batch_size: int = 30,
     total_batches: int = None,
     blob_subset=None
-) -> pd.DataFrame:
+) -> Dict:
     """Process a slice of blobs with delta detection and synchronize changes to Azure AI Search (upserts and deletes)."""
 
     central_time = datetime.now(timezone("US/Central")).strftime("%Y-%m-%d %H:%M:%S")
@@ -552,20 +552,18 @@ def data_chunk_embed_upload_batch(
 
     upserts: List[dict] = []
     deletes: List[str] = []
-    upserts_by_file = {}
-    failed_files = []
-    current_filenames: Set[str] = set()
-
     added_files = set()
-    deleted_files = set()
     modified_files = set()
+    skipped_files = []
+    failed_files = []
 
     for i, blob in enumerate(current_batch):
         print(f"📄 [Index: {index_name} ({total_files} files)] [Batch {batch_number + 1}/{total_batches}] [{start + i + 1}/{total_files}] Processing: {blob.name}")
         if not is_english_filename(blob.name):
             continue
-        current_filenames.add(blob.name.lower())
+
         try:
+            existing_chunks = get_existing_chunks(search_client, blob.name.lower())
             metadata_df, new_docs, to_delete = chunk_and_embed_single_file(
                                                 splitter=splitter,
                                                 embedder=embedder,
@@ -585,16 +583,16 @@ def data_chunk_embed_upload_batch(
             )
 
             # Log changes per file
-            if new_docs and not to_delete:
+            if not new_docs and not to_delete:
+                skipped_files.append(blob.name)
+            elif not existing_chunks and new_docs:
                 added_files.add(blob.name)
-            elif to_delete and not new_docs:
-                deleted_files.add(blob.name)
-            elif new_docs and to_delete:
+            elif existing_chunks and (new_docs or to_delete):
                 modified_files.add(blob.name)
 
-            upserts_by_file[blob.name] = len(new_docs)
             upserts.extend(new_docs)
             deletes.extend(to_delete)
+
         except Exception as e:
             print(f"❌ Failed: {blob.name} — {str(e)}")
             failed_files.append(blob.name)
@@ -615,12 +613,14 @@ def data_chunk_embed_upload_batch(
     if deletes:
         delete_docs_by_ids(search_client, deletes)
 
+    deleted_files = clean_file_level_deletes_after_batch(connection_string, container_name, search_client)
+
     results = {
         "timestamp_central": central_time,
         "metadata_df": metadata_df,
         "uploaded_chunks": len(upserts),
         "deleted_chunks": len(deletes),
-        "skipped_files": len(current_batch) - (len(upserts_by_file) + len(failed_files)),
+        "skipped_files": len(skipped_files),
 
         "added_files": {
             "count": len(added_files),
@@ -647,7 +647,7 @@ def clean_file_level_deletes_after_batch(
     connection_string: str,
     container_name: str,
     search_client: SearchClient
-    ) -> None:
+    ) -> List[str]:
     """Deletes index documents for files no longer present in blob storage."""
     print("🔍 Starting post-batch file-level cleanup...")
     
@@ -669,3 +669,5 @@ def clean_file_level_deletes_after_batch(
         print(f"✅ Deleted {len(stale_ids)} stale documents from index.")
     else:
         print("✅ No stale documents to delete.")
+
+    return missing_in_blob
