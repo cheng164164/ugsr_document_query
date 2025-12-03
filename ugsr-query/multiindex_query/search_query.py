@@ -66,7 +66,7 @@ def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "conte
         return raw_query if raw_query else ""
 
 
-def decompose_query(query: str) -> list[str]:
+def decompose_query(query: str, debug: bool = False) -> list[str]:
     prompt = f"""
         You are an expert assistant that decomposes complex multi-part questions into smaller, independent sub-questions—**but only when necessary**.
         Your rules:
@@ -75,7 +75,7 @@ def decompose_query(query: str) -> list[str]:
         - Words like "what, how, who, why, when, where, which" often indicate separate sub-questions. You can decompose based on these cues.
         - Some questions may refer to more than one concept (e.g. “risks and mitigation strategies”), but if these are tightly related and part of the same topic, do **not** split them. 
           Only decompose when the question naturally contains multiple distinct tasks or inquiries.
-        - Do **not** over-explain or expand single question or sub-questions, preserve the original phrasing of them.
+        - Do not try to interpret, expand meaning or rephrasing the question when dividing into subqueries, just preserve the original phrasing of the subqueries.
         Examples:
         Q: "What are the risks and mitigation strategies for cloud migration?"
         → ["What are the risks and mitigation strategies for cloud migration?"]
@@ -101,6 +101,9 @@ def decompose_query(query: str) -> list[str]:
             messages=[{"role": "user", "content": prompt}]
         )
         result = json.loads(response.choices[0].message.content)
+        if debug:
+            print(f"Decomposed query result: {result}")
+
         if isinstance(result, list) and all(isinstance(item, str) for item in result) and result:
             return result
         else:

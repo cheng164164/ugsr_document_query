@@ -11,12 +11,7 @@ from azure.storage.queue import QueueClient
 set_env_vars(ENV_VARS)
 logging.basicConfig(level=logging.INFO)
 logging.info("🔁 index_creation HTTP trigger module loaded.")
-
-if enable_delta_updates:
-    from index_creation.indexer_delta import *
-else:
-    from index_creation.indexer import *
-
+ 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("🚀 HTTP trigger function started.")
@@ -27,7 +22,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         queue_name = os.getenv("QUEUE_NAME")
         queue_client = QueueClient.from_connection_string(conn_str, queue_name)
 
-        batch_size =20  # adjust as needed
+        batch_size =30 # adjust as needed
 
         if enable_grouping:
             logging.info("🧩 Group-by-group mode is ENABLED.")

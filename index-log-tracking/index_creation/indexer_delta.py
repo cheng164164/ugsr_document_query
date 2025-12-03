@@ -344,7 +344,7 @@ def retry_embedding_with_backoff(embedder, texts: List[str], max_retries=5):
             print(f"⚠️ Rate limit hit. Retry {attempt + 1}/{max_retries} in {delay}s...")
             time.sleep(delay)
             delay *= 2  # Exponential backoff
-    raise Exception("❌ Failed after max retries due to open AI rate limiting.")
+    raise RateLimitError("❌ Failed after max retries due to open AI rate limiting.")
 
 
 def get_existing_chunks(search_client: SearchClient, filename: str) -> Dict[str, Dict]:
@@ -437,10 +437,16 @@ def chunk_and_embed_single_file(
         meta = meta_row.iloc[0].to_dict()
 
     if using_embedder:
-        vectors = retry_embedding_with_backoff(embedder, texts)
+        try:
+            vectors = retry_embedding_with_backoff(embedder, texts)
+        except Exception as e:
+            raise RuntimeError(f"Embedding failed for {file_name} after retries: {str(e)}")
     else:
         resp = embedder_client.embeddings.create(model="text-embedding-3-small", input=texts)
         vectors = [item.embedding for item in resp.data]
+
+    if len(vectors) != len(chunks):
+        raise ValueError(f"Mismatch between vectors ({len(vectors)}) and chunks ({len(chunks)}) for {file_name}")
 
     new_docs: List[dict] = []
     new_ids: Set[str] = set()

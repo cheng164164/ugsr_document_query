@@ -4,7 +4,8 @@ import os
 
 # Global control flags
 enable_grouping = os.getenv("ENABLE_GROUPING", "true").lower() == "true"
-enable_delta_updates = os.getenv("ENABLE_DELTA_UPDATES", "true").lower() == "false"
+enable_delta_updates = os.getenv("ENABLE_DELTA_UPDATES", "true").lower() == "true"
+enable_json_flattening = os.getenv("ENABLE_JSON_FLATTENING", "true").lower() == "true"
 
 ENV_VARS = {
     "AZURE_BLOB_CONN_STRING": "<your blob connect string>",
@@ -20,6 +21,7 @@ ENV_VARS = {
     "AZURE_EMBEDDING_DEPLOYMENT_NAME": "<your_embedding_deployment_name>",
     "QUEUE_NAME": "<your_queue_name>"
 }
+
 
 
 ########################################################################################
@@ -142,8 +144,9 @@ SCHEMA_MAPPING_DICT = {
 }
 
 
-'''
+
 ###############################################################################
+'''
 #### Chatbot "LDGN"
 INDEX_CONFIGS = [
     {

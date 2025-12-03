@@ -11,21 +11,8 @@ import requests
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from collections import Counter
 from typing import List
+from .config import ENV_VARS
 
-
-
-
-# Tokenizer for GPT-4o (O3 models)
-tokenizer = get_encoding("cl100k_base")
-
-AZURE_BLOB_CONN_STRING = os.getenv("AZURE_BLOB_CONN_STRING")
-AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
-AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
-
-# Max token budget for safety (adjustable)
-MAX_TOTAL_TOKENS = 16000
-EXPECTED_COMPLETION_TOKENS = 1000
-MAX_INPUT_TOKENS = MAX_TOTAL_TOKENS - EXPECTED_COMPLETION_TOKENS
 
 
 def set_env_vars(ENV_VARS=None):
@@ -41,6 +28,21 @@ def set_env_vars(ENV_VARS=None):
         # Use ENV_VARS value if not a placeholder, else keep .env value
         if value and not value.startswith('<') and not value.endswith('>'):
             os.environ[k] = value
+
+
+set_env_vars(ENV_VARS)
+
+# Tokenizer for GPT-4o (O3 models)
+tokenizer = get_encoding("cl100k_base")
+
+AZURE_BLOB_CONN_STRING = os.getenv("AZURE_BLOB_CONN_STRING")
+AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
+
+# Max token budget for safety (adjustable)
+MAX_TOTAL_TOKENS = 16000
+EXPECTED_COMPLETION_TOKENS = 1000
+MAX_INPUT_TOKENS = MAX_TOTAL_TOKENS - EXPECTED_COMPLETION_TOKENS
 
 
 def title_case_filename(filename):

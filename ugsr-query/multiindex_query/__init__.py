@@ -76,7 +76,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             history_context = ""
             rewrited_query = cleaned_query
 
-        sub_queries = decompose_query(rewrited_query)[:4]  # Limit to top 4 sub-queries
+        sub_queries = decompose_query(rewrited_query, debug_mode)[:4]  # Limit to top 4 sub-queries
         logging.info(f"🔍 Decomposed into {len(sub_queries)} sub-queries.")
         
         ## Step 1: Index filtering

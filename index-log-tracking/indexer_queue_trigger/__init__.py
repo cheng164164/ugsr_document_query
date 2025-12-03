@@ -39,10 +39,12 @@ azure_oai_embedding_deployment = os.getenv('AZURE_EMBEDDING_DEPLOYMENT_NAME', 't
 
 def import_indexer_module(config):
     is_xml = config.get("is_xml", False)
+
+    # Force delta update ON for XML, otherwise use global value
+    delta_updates_enabled = True if is_xml else enable_delta_updates
     if is_xml:
-        enable_delta_updates = True
         return import_module("index_creation.indexer_delta_xml")
-    elif enable_delta_updates:
+    elif delta_updates_enabled:
         return import_module("index_creation.indexer_delta")
     else:
         return import_module("index_creation.indexer")

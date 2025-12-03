@@ -350,7 +350,7 @@ def retry_embedding_with_backoff(embedder, chunks, max_retries=5):
             print(f"⚠️ Rate limit hit. Retry {attempt + 1}/{max_retries} in {delay}s...")
             time.sleep(delay)
             delay *= 2  # Exponential backoff
-    raise Exception("❌ Failed after max retries due to open AI rate limiting.")
+    raise RateLimitError("❌ Failed after max retries due to open AI rate limiting.")
 
 
 def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string, container_name, metadata_df, metadata_container, metadata_blob_name,
@@ -403,11 +403,20 @@ def chunk_and_embed_docs(splitter, embedder, embedder_client, connection_string,
 
         chunks = splitter.create_documents([doc_content])
         if using_embedder:
-            vectors = retry_embedding_with_backoff(embedder, chunks)
-            # vector_summary = embedder.embed_documents([summary])[0]
+            try:
+                vectors = retry_embedding_with_backoff(embedder, chunks)
+                # vector_summary = embedder.embed_documents([summary])[0]
+            except Exception as e:
+                print(f" ❌ Embedding failed after retries: {blob.name} — {str(e)}")
+                continue
         else:
             vectors = embedder_client.embeddings.create(model="text-embedding-3-small", input=[chunk.page_content for chunk in chunks])
             # vector_summary = embedder_client.embeddings.create(model="text-embedding-3-small", input=[summary])
+
+        if len(vectors) != len(chunks):
+            raise ValueError(
+                        f"Mismatch between vectors ({len(vectors)}) and chunks ({len(chunks)}) for {blob.name}"
+                    )
 
         for chunk_id, (vec, chunk) in enumerate(zip(vectors, chunks)):
             indexed_docs.append({
@@ -528,12 +537,22 @@ def data_chunk_embed_upload_batch(splitter, embedder, embedder_client, connectio
             chunks = splitter.create_documents([doc_content])
 
             if using_embedder:
-                vectors = retry_embedding_with_backoff(embedder, chunks)
-                # vector_summary = embedder.embed_documents([summary])[0]
+                try:
+                    vectors = retry_embedding_with_backoff(embedder, chunks)
+                    # vector_summary = embedder.embed_documents([summary])[0]
+                except Exception as e:
+                    print(f" ❌ Embedding failed after retries: {blob.name} — {str(e)}")
+                    failed_files.add(blob.name)
+                    continue
             else:
                 vectors = embedder_client.embeddings.create(model="text-embedding-3-small", input=[chunk.page_content for chunk in chunks])
                 # vector_summary = embedder_client.embeddings.create(model="text-embedding-3-small", input=[summary])
 
+            if len(vectors) != len(chunks):
+                raise ValueError(
+                        f"Mismatch between vectors ({len(vectors)}) and chunks ({len(chunks)}) for {blob.name}"
+                    )
+            
             for chunk_id, (vec, chunk) in enumerate(zip(vectors, chunks)):
                 indexed_docs.append({
                     "id": make_doc_id(file_name.lower(), chunk_id),

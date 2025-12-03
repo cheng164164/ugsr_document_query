@@ -17,14 +17,56 @@ from azure.search.documents.indexes.models import (
     SearchFieldDataType
 )
 from azure.storage.blob import BlobServiceClient
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
 from openai import RateLimitError
 import logging
 from azure.core.exceptions import ResourceNotFoundError
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 from io import StringIO
 import pandas as pd
+from index_creation.config import enable_json_flattening, ENV_VARS
+from index_creation.util import set_env_vars
+
+
+set_env_vars(ENV_VARS)
+azure_oai_embedding_deployment = os.getenv('AZURE_EMBEDDING_DEPLOYMENT_NAME', 'text-embedding-3-small')
+
+if azure_oai_embedding_deployment == "text-embedding-3-large":
+    EMBEDDING_DIMENSIONS = 3072
+else:
+    EMBEDDING_DIMENSIONS = 1536
+
+MAX_CHARS_PER_CHUNK = 1000  # adjust as needed
+
+
+class ChunkCollector:
+    def __init__(self, filename, topic_title, max_chars=MAX_CHARS_PER_CHUNK):
+        self.filename = filename
+        self.topic_title = topic_title
+        self.max_chars = max_chars
+        self.buffer = ""
+        self.chunk_id = 0
+        self.chunks = []
+
+    def add_text(self, text):
+        if len(self.buffer) + len(text) > self.max_chars:
+            self.flush()
+        self.buffer += text + "\n"
+
+    def flush(self, force=False):
+        if self.buffer.strip() and (force or len(self.buffer) >= self.max_chars):
+            self.chunks.append((
+                self.filename,
+                self.chunk_id,
+                self.topic_title,
+                self.buffer.strip()
+            ))
+            self.chunk_id += 1
+            self.buffer = ""
+
+    def finalize(self):
+        self.flush(force=True)
+        return self.chunks
 
 
 
@@ -37,15 +79,17 @@ def make_doc_id(file_key: str, chunk_id: int):
     return f"{encoded}-chunk-{chunk_id}"
 
 
-def retry_embedding_with_backoff(embedder, texts, max_retries=5):
+def retry_embedding_with_backoff(embedder, texts: List[str], max_retries=5):
     delay = 10
     for attempt in range(max_retries):
         try:
             return embedder.embed_documents(texts)
-        except RateLimitError:
+        except RateLimitError as e:
+            print(f"⚠️ Rate limit hit. Retry {attempt + 1}/{max_retries} in {delay}s...")
             time.sleep(delay)
-            delay *= 2
-    raise Exception("Embedding failed after retries.")
+            delay *= 2  # Exponential backoff
+    raise RateLimitError("❌ Failed after max retries due to open AI rate limiting.")
+
 
 
 def get_existing_chunks(search_client: SearchClient, filename: str):
@@ -58,27 +102,149 @@ def get_existing_chunks(search_client: SearchClient, filename: str):
     return {r["id"]: {"chunk_id": r["chunk_id"], "content_sha256": r["content_sha256"]} for r in results}
 
 
+def label_for_tag(tag: str, elem=None):
+    label_map = {
+        "note": lambda e: f"[{e.attrib.get('type', 'NOTE').upper()}]",
+        "title": lambda e: "[TITLE]",
+        "fig": lambda e: "[FIGURE]",
+        "cmd": lambda e: "[CMD]",
+        "step": lambda e: "[STEP]",
+    }
+    return label_map.get(tag, lambda e: "")(elem)
+  
 
-def parse_dita_xml_blob(blob_data: bytes, filename: str):
-    parser = etree.XMLParser(recover=True)
-    root = etree.fromstring(blob_data, parser=parser)
-    chunks = []
-    title_elem = root.find('.//{*}title')
-    main_title = title_elem.text.strip() if title_elem is not None else ""
+def extract_dita_text_recursive(elem, filename="", topic_title=""):
+    collector = ChunkCollector(filename, topic_title, max_chars=MAX_CHARS_PER_CHUNK)
 
-    for i, elem in enumerate(root.iter()):
-        if not isinstance(elem.tag, str):
-            continue
-        tag = etree.QName(elem).localname
-        text = (elem.text or '').strip()
-        if tag == 'p' and text:
-            chunks.append((filename, i, main_title, text))
-        elif tag == 'note' and text:
-            note_type = elem.attrib.get('type', 'note').upper()
-            chunks.append((filename, i, main_title, f"[{note_type}] {text}"))
-        elif tag == 'title' and text and elem.getparent() is not None and etree.QName(elem.getparent()).localname == 'fig':
-            chunks.append((filename, i, main_title, f"[FIGURE] {text}"))
+    def recurse(element):
+        if not isinstance(element.tag, str):
+            return
+
+        tag = etree.QName(element).localname
+        text = (element.text or "").strip()
+
+        if text:
+            label = label_for_tag(tag, element)
+            labeled_text = f"{label} {text}" if label else text
+            collector.add_text(labeled_text)
+
+        for child in element:
+            recurse(child)
+
+        tail = (element.tail or "").strip()
+        if tail:
+            collector.add_text(tail)
+
+    recurse(elem)
+    chunks = collector.finalize()
+    for i, c in enumerate(chunks):
+        if not isinstance(c, tuple) or len(c) != 4:
+            raise ValueError(f"❌ Chunk from topic file {filename} is invalid at {i}: {c}")
     return chunks
+
+
+def xml_element_to_json(element):
+    if not isinstance(element.tag, str):
+        return None
+
+    node = {
+        "tag": etree.QName(element).localname,
+        "attributes": dict(element.attrib),
+        "text": (element.text or "").strip(),
+        "children": []
+    }
+
+    for child in element:
+        child_node = xml_element_to_json(child)
+        if child_node:
+            node["children"].append(child_node)
+
+    return node
+
+
+def flatten_json_content(json_node, buffer=None):
+    if buffer is None:
+        buffer = []
+
+    tag = json_node["tag"]
+    text = json_node["text"]
+    attrs = json_node["attributes"]
+
+    label = f"[{tag.upper()}]"
+    attr_info = " ".join([f'{k}="{v}"' for k, v in attrs.items()])
+
+    line = f"{label} {text} {attr_info}".strip()
+    if line:
+        buffer.append(line)
+
+    for child in json_node["children"]:
+        flatten_json_content(child, buffer)
+
+    return buffer
+
+
+def extract_xml_flattened_json(root, filename: str, topic_title: str) -> List[Tuple[str, int, str, str]]:
+    json_tree = xml_element_to_json(root)
+    flat_lines = flatten_json_content(json_tree)
+
+    collector = ChunkCollector(filename, topic_title, max_chars=MAX_CHARS_PER_CHUNK)
+    for line in flat_lines:
+        collector.add_text(line)
+    chunks = collector.finalize()
+
+    return [
+        (filename, chunk_id, topic_title, chunk_text)
+        for filename, chunk_id, topic_title, chunk_text in chunks
+    ]
+
+
+def extract_xml_text_generalized(elem, filename="", topic_title=""):
+    collector = ChunkCollector(filename, topic_title, max_chars=MAX_CHARS_PER_CHUNK)
+
+    def recurse(element, level=0):
+        if not isinstance(element.tag, str):
+            return
+
+        tag = etree.QName(element).localname
+        attrs = " ".join([f'{k}="{v}"' for k, v in element.attrib.items()])
+        prefix = "  " * level
+
+        # Include the tag and attributes
+        collector.add_text(f"{prefix}<{tag} {attrs}>".strip())
+
+        # Include inner text
+        text = (element.text or "").strip()
+        if text:
+            collector.add_text(f"{prefix}  {text}")
+
+        # Traverse children
+        for child in element:
+            recurse(child, level + 1)
+
+        # Close tag and tail
+        collector.add_text(f"{prefix}</{tag}>")
+        tail = (element.tail or "").strip()
+        if tail:
+            collector.add_text(f"{prefix}  {tail}")
+
+    recurse(elem)
+    return collector.finalize()
+
+
+def parse_dita_xml_blob(blob_data: bytes, filename: str) -> list:
+    parser = etree.XMLParser(recover=True)
+    try:
+        root = etree.fromstring(blob_data, parser=parser)
+    except Exception as e:
+        raise ValueError(f"XML parsing failed for {filename}: {e}")
+
+    title_elem = root.find('.//{*}title')
+    topic_title = title_elem.text.strip() if title_elem is not None else ""
+
+    if enable_json_flattening:
+        return extract_xml_flattened_json(root, filename, topic_title)
+    else:
+        return extract_xml_text_generalized(root, filename, topic_title)
 
 
 def append_parsed_chunks_to_csv_blob(connection_string: str, container_name: str, folder_path: str, filename: str, new_chunks: List[tuple]) -> None:
@@ -130,7 +296,7 @@ def create_index(index_name: str, search_key: str, search_endpoint: str) -> None
         SimpleField(name="chunk_id", type=SearchFieldDataType.Int32, filterable=True, sortable=True),
         SimpleField(name="content_sha256", type=SearchFieldDataType.String, filterable=True, sortable=False),
         SimpleField(name="last_modified", type=SearchFieldDataType.DateTimeOffset, filterable=True, sortable=True),
-        SearchField(name="content_embedding", type=SearchFieldDataType.Collection(SearchFieldDataType.Single), searchable=True, hidden=False, vector_search_dimensions=1536, vector_search_profile_name='default'),
+        SearchField(name="content_embedding", type=SearchFieldDataType.Collection(SearchFieldDataType.Single), searchable=True, hidden=False, vector_search_dimensions=EMBEDDING_DIMENSIONS, vector_search_profile_name='default'),
     ]
 
     vector_search = VectorSearch(
@@ -175,12 +341,15 @@ def iter_all_index_docs(search_client: SearchClient, select_fields: List[str]):
         yield r
 
 
-def chunk_and_embed_single_file(blob_name, container_client, embedder, embedder_client, search_client, using_embedder=True):
+def chunk_and_embed_single_file(splitter, embedder, embedder_client, container_client, blob_name, search_client, using_embedder=True):
     blob_client = container_client.get_blob_client(blob_name)
     blob_data = blob_client.download_blob().readall()
     filename = os.path.basename(blob_name).lower()
 
     chunks_raw = parse_dita_xml_blob(blob_data, filename)
+    logging.info(f"🔍 Processing file: {filename}, blob size: {len(blob_data)} bytes")
+    logging.info(f"✅ Chunks extracted: {len(chunks_raw)}")
+
     texts = [c[3] for c in chunks_raw]
 
 
@@ -189,18 +358,23 @@ def chunk_and_embed_single_file(blob_name, container_client, embedder, embedder_
     existing_hashes = {v["chunk_id"]: v["content_sha256"] for v in existing.values()}
 
     if existing_hashes == current_hashes:
-        return [], [], "skipped"
+        return [], [], "skipped", chunks_raw
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     split_docs = splitter.create_documents(texts)
     if using_embedder:
-        vectors = retry_embedding_with_backoff(embedder, [d.page_content for d in split_docs])
+        try:
+            vectors = retry_embedding_with_backoff(embedder, [d.page_content for d in split_docs])
+        except Exception as e:
+            raise RuntimeError(f"Embedding failed for {filename} after retries: {str(e)}")
     else:
         vectors = embedder_client.embeddings.create(
             model="text-embedding-3-small",
             input=[d.page_content for d in split_docs]
         ).data
 
+    if len(vectors) != len(split_docs):
+        raise ValueError(f"Mismatch between vectors ({len(vectors)}) and chunks ({len(split_docs)}) for {filename}")
+    
     new_ids = set()
     upserts = []
     for i, ((filename, chunk_id, title, text), vec) in enumerate(zip(chunks_raw, vectors)):
@@ -257,10 +431,16 @@ def data_chunk_embed_upload_batch(
     if blob_subset is not None:
         blob_subset_set = set(blob_subset)
         current_batch = [b for b in xml_blobs if b.name in blob_subset_set]
+        total_files = len(current_batch)
+        start = 0
+        end = total_files
     else:
         start = batch_number * batch_size
         end = min(start + batch_size, len(xml_blobs))
         current_batch = xml_blobs[start:end]
+        total_files = len(xml_blobs)
+
+    print(f"📦 [Index: {index_name}] Starting batch {batch_number + 1}/{total_batches or '?'}: processing files {start + 1} to {end} of {total_files}")
 
     search_client = SearchClient(endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
                                  index_name=index_name,
@@ -274,7 +454,8 @@ def data_chunk_embed_upload_batch(
     failed_files = []
 
     all_chunks_raw = []
-    for blob in current_batch:
+    for i, blob in enumerate(current_batch):
+        print(f"📄 [{index_name}][Batch {batch_number + 1}/{total_batches or '?'}] [{start + i + 1}/{total_files}] Processing: {blob.name}")
         try:
             existing_chunks = get_existing_chunks(search_client, blob.name.lower())
 
@@ -301,11 +482,14 @@ def data_chunk_embed_upload_batch(
             deletes.extend(to_delete)
 
         except Exception as e:
+            logging.error(f"❌ Failed to process {blob.name}: {e}", exc_info=True)
             failed_files.append(blob.name)
             continue
 
     for i in range(0, len(upserts), 1000):
         search_client.merge_or_upload_documents(upserts[i:i + 1000])
+        print(f"✅ Uploaded batch segment {i//1000 + 1} ({min(i+1000, len(upserts))}/{len(upserts)} chunks)")
+
     if deletes:
         delete_docs_by_ids(search_client, deletes)
 
@@ -314,9 +498,10 @@ def data_chunk_embed_upload_batch(
     append_parsed_chunks_to_csv_blob(connection_string=connection_string,
                                     container_name="index-logs",
                                     folder_path="xml-parsing-logs",
-                                    filename="parsed_chunks_all_batches.csv",
+                                    filename=f"parsed_chunks_{central_time}.csv",
                                     new_chunks=all_chunks_raw
                                     )
+    print(f"🎉 Finished [Index: {index_name}] Batch {batch_number + 1}/{total_batches or '?'} — Uploaded: {len(upserts)}, Deleted: {len(deletes)}, Skipped: {len(skipped_files)}, Failed: {len(failed_files)}")
     
     return {
         "timestamp_central": central_time,
