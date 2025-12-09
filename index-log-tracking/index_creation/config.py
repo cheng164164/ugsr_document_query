@@ -118,11 +118,11 @@ SCHEMA_MAPPING_DICT = {
 
 
 ###############################################################################
-
+'''
 #### Chatbot "Andy"
 INDEX_CONFIGS = [
     {
-        "index_name": "dev_hub_index_v2",
+        "index_name": "dev_hub_index",
         "metadata_container": "development-hub-documents-metadata",
         "metadata_blob": "auto_extraction/development_hub_metadata_new.csv",
         "document_container": "development-hub-documents",
@@ -132,7 +132,7 @@ INDEX_CONFIGS = [
 
 SCHEMA_MAPPING_DICT = {
     ### Mapping of standard schema -> metadata columns
-    "dev_hub_index_v2": {
+    "dev_hub_index": {
         "Name": "Name",
         "Title": None,
         "Doc Type": None,
@@ -142,11 +142,11 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     } 
 }
-
+'''
 
 
 ###############################################################################
-'''
+
 #### Chatbot "LDGN"
 INDEX_CONFIGS = [
     {
@@ -171,4 +171,3 @@ SCHEMA_MAPPING_DICT = {
         "url": None 
     } 
 }
-'''

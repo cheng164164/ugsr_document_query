@@ -75,7 +75,11 @@ def decompose_query(query: str, debug: bool = False) -> list[str]:
         - Words like "what, how, who, why, when, where, which" often indicate separate sub-questions. You can decompose based on these cues.
         - Some questions may refer to more than one concept (e.g. “risks and mitigation strategies”), but if these are tightly related and part of the same topic, do **not** split them. 
           Only decompose when the question naturally contains multiple distinct tasks or inquiries.
-        - Do not try to interpret, expand meaning or rephrasing the question when dividing into subqueries, just preserve the original phrasing of the subqueries.
+        - Do **not** over-explain or expand single question or sub-questions, preserve the original phrasing of them.
+        - If you decompose into multiple questions, ensure each sub-question is fully self-contained.
+        - Avoid using pronouns like "these", "those", "they", or "it" that depend on previous sub-questions.
+        - Instead, restate the referenced concept explicitly in the sub-question.
+        
         Examples:
         Q: "What are the risks and mitigation strategies for cloud migration?"
         → ["What are the risks and mitigation strategies for cloud migration?"]
@@ -85,7 +89,7 @@ def decompose_query(query: str, debug: bool = False) -> list[str]:
         → ["How do I perform a software release test?"]
         Q: "First I want to extract the data, then clean it, and finally store it."
         → ["How do I extract the data?", "How do I clean the data?", "How do I store the data?"]
-        Respond with a JSON array of sub-questions.
+        Respond ONLY with a JSON array of sub-questions, no code fences, no commentary. Do NOT use ```json or any markdown formatting.
         User question: "{query}"
     """.strip()
 
@@ -100,7 +104,23 @@ def decompose_query(query: str, debug: bool = False) -> list[str]:
             model="o4-mini",
             messages=[{"role": "user", "content": prompt}]
         )
-        result = json.loads(response.choices[0].message.content)
+        raw_output = response.choices[0].message.content.strip()
+        
+        # --- CLEAN CODE FENCES ---
+        cleaned = raw_output
+
+        # Remove ```json ... ```
+        cleaned = re.sub(r"^```json\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+
+        # Remove generic ```
+        cleaned = re.sub(r"^```\s*|\s*```$", "", cleaned, flags=re.DOTALL).strip()
+
+        try:
+            result = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            logging.warning(f"Decomposed query raw result: {raw_output!r}")
+            return [query]  # Fallback to original
+
         if debug:
             print(f"Decomposed query result: {result}")
 
@@ -501,8 +521,13 @@ def should_use_metadata_search(query):
 def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=False):
     """
     Uses LLM to confirm whether the provided context actually answers the user's query.
-    Returns a tuple (is_valid, explanation, is_completely_irrelevant)
+    Returns:
+        is_valid (bool)
+        explanation (str)
+        is_completely_irrelevant (bool)
+        selected_doc_tags (list[str])   <-- (LLM-selected DocN tags)
     """
+
     if strict_mode: 
         system_msg = {
             "role": "system",
@@ -517,7 +542,8 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
                 "For example, if the USER QUESTION mentions 'crane', and the context is about lifting equipment, do not mention bird species.\n"
                 "The purpose of explainaton is also to help guide the user toward a more appropriate query.\n"
                 "If the query partially matches certain keywords in the CONTEXT, prompt the user for clarification, but ONLY based on the meaning used within the CONTEXT.\n"
-                "End by asking: 'Would you like to clarify your question?'"
+                "If answer is 'no', end the short summary by asking: 'Would you like to clarify your question?'"
+                "Do not reference any specific document in your explanation. Your explanation should be general and should not mention Doc1, Doc2, etc., even if they appear in the context."
             )
         }
 
@@ -528,8 +554,9 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
                 "You are a supportive assistant helping users determine if their query can be answered with the available CONTEXT.\n"
                 "Be flexible — if the query is somehow related to the topic of context, or any keyword or phrase partially match, answer 'yes'.\n"
                 "Only when the query is totally unrelated with the topic of context, answer 'no' with a brief explanation and suggest the closest match if possible.\n"
-                "Always try to assist even with keywords or s partial match.\n"
-                "Reply must start with 'yes' or 'no' and end by asking: 'Would you like to clarify your question?'"
+                "Always try to assist even with keywords or partial match.\n"
+                "Reply must start with 'yes' or 'no'. If answer is 'no', end the explanation by asking: 'Would you like to clarify your question?' if answer is 'no'.\n"
+                "Do not reference any specific document in your explanation. Your explanation should be general and should not mention Doc1, Doc2, etc., even if they appear in the context."
             )
         }
 
@@ -549,6 +576,8 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
 
     # Second: determine if the question is completely irrelevant
     is_completely_irrelevant = False
+    selected_doc_tags = []
+
     if not is_valid:
         irrelevance_messages =[{
                 "role": "user",
@@ -575,7 +604,48 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
         relevance_tag = irrelevance_response.choices[0].message.content.strip().upper()
         is_completely_irrelevant = relevance_tag == "IRRELEVANT"
 
-    return is_valid, answer, is_completely_irrelevant
+        # Third: LLM SELECTS MOST RELEVANT DocN TAGS
+        if not is_completely_irrelevant:
+            # Use the Doc1/Doc2/... markers from the context to identify which docs are most helpful
+            tag_selection_prompt = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a document selector. The context contains multiple document chunks, "
+                        "each tagged like (Doc1), (Doc2), etc.\n"
+                        "Your task is to identify the 1 or 2 most relevant document tags.\n"
+                        "Rules:\n"
+                        "- ONLY return the tag names such as: Doc2, Doc1\n"
+                        "- Do NOT include explanations.\n"
+                        "- Do NOT return text outside the tag list."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"QUESTION:\n{query}\n\n"
+                        f"CONTEXT WITH TAGS:\n{context_text}\n\n"
+                        "Which tagged documents are most relevant? Return only tag names."
+                    )
+                }
+            ]
+
+            try:
+                tag_response = client.chat.completions.create(
+                    model=deployment,
+                    messages=tag_selection_prompt
+                )
+                raw_tag_output = tag_response.choices[0].message.content.strip()
+
+                # Extract DocN patterns from response
+                selected_doc_tags = re.findall(r"Doc\d+", raw_tag_output)
+
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to extract Doc tags from LLM: {e}")
+                selected_doc_tags = []
+
+
+    return is_valid, answer, is_completely_irrelevant, selected_doc_tags
 
 
 def metadata_table_by_index(index_names):
@@ -1163,53 +1233,67 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
 
     context_str = "\n\n".join(context_texts)
 
-    is_valid, explanation, is_completely_irrelevant = llm_context_guard_check(
-        query, context_str, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=strict_mode
-    )
+    is_valid, explanation, is_completely_irrelevant, selected_doc_tags = llm_context_guard_check(
+                                                                                query, context_str, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=strict_mode
+                                                                            )
     explanation = ' '.join(explanation.strip().split()[1:])
-
+    print('LLM Context Validity Check:', f'is_valid={is_valid};\n is_completely_irrelevant={is_completely_irrelevant};\n explanation={explanation};\n referenced_doc_tags_in_explanation={selected_doc_tags}')
+    
+    # === CASE: Context not valid ===
     if not is_valid:
         main_answer = (
             "Sorry, I cannot help with that. The provided documents do not clearly explain the requested information.\n"
             f"(Reason: {explanation})"
         )
 
+        # Clean tag markers from explanation ((DocN), [DocN], etc.)
+        main_answer = re.sub(r"\(Doc\d+\)", "", main_answer)
+        main_answer = re.sub(r"\[Doc\d+\]", "", main_answer)  # also remove [DocN] if used
+        main_answer = re.sub(r"\n\s*\n", "\n\n", main_answer).strip()
+
         if not is_completely_irrelevant and top_chunks:
-            top3 = top_chunks[:3]
-            file_votes = {}
-            for chunk in top3:
-                filename = chunk.get('filename', 'N/A')
-                if filename not in file_votes:
-                    file_votes[filename] = {'count': 0, 'chunk': chunk}
-                file_votes[filename]['count'] += 1
+            # Map selected_doc_tags -> filenames
+            recommended_filenames = {tag_lookup[tag] for tag in selected_doc_tags if tag in tag_lookup}
 
-            most_common_doc = max(file_votes.values(), key=lambda x: x['count'])['chunk']
-            most_common_filename = most_common_doc.get("filename", "N/A")
-            resolved_filename = resolve_reference_name(most_common_filename, supplement_files)
-            url_value = resolve_reference_url(most_common_filename, (most_common_doc.get("url") or "").split(";")[0].strip(), supplement_files)
+            # Fallback to top_chunks[0] if nothing selected
+            if not recommended_filenames:
+                recommended_filenames = {doc.get("filename", "N/A") for doc in top_chunks[:2]}
 
-            main_answer += ("\n\n---\n Please refer to the following document for helpful information.")
-            main_answer += f"\n\n**Resource**: [{title_case_filename(resolved_filename)}]({url_value})"
-            if not hide_ref_contact:
-                main_answer += f"\n\n**Key Contact**: {title_case_name(most_common_doc.get('owner', 'N/A'))}"
+            main_answer += ("\n\n---\n Please refer to the following document(s) for helpful information.")
+
+            for filename in list(recommended_filenames)[:2]:
+                doc = doc_groups.get(filename, {})
+                resolved_filename = resolve_reference_name(filename, supplement_files)
+                url_value = resolve_reference_url(filename, (doc.get("url") or "").split(";")[0].strip(), supplement_files)
+
+                main_answer += f"\n\n**Resource**: [{title_case_filename(resolved_filename)}]({url_value})"
+                if not hide_ref_contact:
+                    main_answer += f"\n\n**Key Contact**: {title_case_name(doc.get('key_contact', 'N/A'))}"
 
         if warning_msg:
             main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
         return f"**Answer:**\n\n{main_answer}"
 
+    # === CASE: Valid context — build answer using tags ===
     instructions = [
         "- Be concise",
-        "- Use only information from the documents. Do not generate answers that don't use the source documents provided.",
+        "- You must use only the information explicitly stated in the document chunks.",
+        "- Do not make assumptions, guesses, or inferences beyond the content.",
+        "- If the answer is not clearly present in the provided documents, do not attempt to answer.",
     ]
 
     if strict_mode:
         instructions.append("- If insufficient information or not sure about the answer, respond with: 'Sorry, I cannot help with that.' Then briefly explain reasoning.")
     else:
-        instructions.append("- If insufficient information or not sure about the answer, ask clarifying questions instead of directly answering it.\nIf the answer is not clearly stated in the provided context, or you are unsure, briefly explain reasoning and then ask: 'Would you like to clarify your question?'")
+        instructions.append("- If the answer is not fully supported by the context, ask the user to clarify their question instead of guessing.")
 
     instructions.extend([
-        "- Tag referenced content using the format (Doc1), (Doc2), etc. Only use this format when referencing documents.",
-        "- If referencing multiple documents, combine them like this: (Doc1, Doc3, Doc4), always use parentheses to enclose the references. Strictly follow this format.",
+        "- You must reference document sources only using the format (Doc1), (Doc2), etc. Always use parentheses.",
+        "- You must place the reference immediately after the sentence or claim it supports. For example:",
+        "    • The operator must press the emergency stop button. (Doc2)",
+        "    • The hydraulic fluid should be replaced every 1000 hours. (Doc5)",
+        "- Never use \"see DocX\", \"as shown in DocX\", or any other format.",
+        "- Never group multiple document references together. If you are referencing more than one document, use separate tags like (Doc1), (Doc2), (Doc3) — not (Doc1, Doc2).",
         "- Do NOT use any other format like 'See Doc1', 'as shown in Doc2', 'in Doc1' or simply reference without parentheses.",
         "- If your answer describes a process, include step-by-step instructions using bullet symbols.",
         "- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink.",
@@ -1236,12 +1320,18 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
     if warning_msg:
         main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
 
+    print("* Generated raw Main Answer *:", main_answer)
     # Identify which tags were referenced
-    referenced_tags = set(tag for tag in tag_lookup if tag in main_answer)
-    referenced_files = {tag_lookup[tag] for tag in referenced_tags}
+    referenced_tags = set(re.findall(r"\(Doc\d+\)", main_answer))
+    referenced_tags = {tag.strip("()") for tag in referenced_tags}
+    referenced_files = {tag_lookup[tag] for tag in referenced_tags if tag in tag_lookup}
+
+    # Fallback: if no (DocN) tags were referenced, fallback to top chunk
+    if not referenced_files and top_chunks:     
+        referenced_files = {doc.get("filename", "N/A") for doc in top_chunks[:2]}
 
     # Clean tag references from main_answer
-    main_answer = re.sub(r"\(Doc\d+(?:\s*,\s*Doc\d+)*\)", "", main_answer)
+    main_answer = re.sub(r"\(Doc\d+\)", "", main_answer)
     main_answer = re.sub(r"\n\s*\n", "\n\n", main_answer).strip()
 
     # Build reference section, max 3

@@ -70,9 +70,10 @@ index_aliases = {
     "all_regions_index": ["all regions", "all region", "regions all", "region all"],
     "policy_center_index": ["policy center", "policy-center"]
 }
+'''
 ######################### Chatbot Config ######################################
 
-
+'''
 ### Chatbot Andi
 chatbot_name = "Andi"
 
@@ -106,6 +107,7 @@ index_aliases = {}
 
 
 ######################### Chatbot Config ######################################
+
 ### Chatbot LDGN
 chatbot_name = "LDGN"
 

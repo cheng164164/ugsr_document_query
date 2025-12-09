@@ -102,62 +102,33 @@ def get_existing_chunks(search_client: SearchClient, filename: str):
     return {r["id"]: {"chunk_id": r["chunk_id"], "content_sha256": r["content_sha256"]} for r in results}
 
 
-def label_for_tag(tag: str, elem=None):
-    label_map = {
-        "note": lambda e: f"[{e.attrib.get('type', 'NOTE').upper()}]",
-        "title": lambda e: "[TITLE]",
-        "fig": lambda e: "[FIGURE]",
-        "cmd": lambda e: "[CMD]",
-        "step": lambda e: "[STEP]",
-    }
-    return label_map.get(tag, lambda e: "")(elem)
-  
-
-def extract_dita_text_recursive(elem, filename="", topic_title=""):
-    collector = ChunkCollector(filename, topic_title, max_chars=MAX_CHARS_PER_CHUNK)
-
-    def recurse(element):
-        if not isinstance(element.tag, str):
-            return
-
-        tag = etree.QName(element).localname
-        text = (element.text or "").strip()
-
-        if text:
-            label = label_for_tag(tag, element)
-            labeled_text = f"{label} {text}" if label else text
-            collector.add_text(labeled_text)
-
-        for child in element:
-            recurse(child)
-
-        tail = (element.tail or "").strip()
-        if tail:
-            collector.add_text(tail)
-
-    recurse(elem)
-    chunks = collector.finalize()
-    for i, c in enumerate(chunks):
-        if not isinstance(c, tuple) or len(c) != 4:
-            raise ValueError(f"❌ Chunk from topic file {filename} is invalid at {i}: {c}")
-    return chunks
-
-
 def xml_element_to_json(element):
     if not isinstance(element.tag, str):
         return None
 
     node = {
         "tag": etree.QName(element).localname,
-        "attributes": dict(element.attrib),
+        "attributes": {k: v for k, v in element.attrib.items() if k != "class"},
         "text": (element.text or "").strip(),
         "children": []
     }
 
     for child in element:
+        # Full recursive convert
         child_node = xml_element_to_json(child)
         if child_node:
             node["children"].append(child_node)
+
+        # Tail becomes a pseudo-node (NO tag, no attributes)
+        tail = (child.tail or "").strip()
+        if tail:
+            node["children"].append({
+                "tag": None,          # IMPORTANT: no tag name!
+                "attributes": {},
+                "text": tail,
+                "is_tail": True,      # marker for flattening logic
+                "children": []
+            })
 
     return node
 
@@ -169,14 +140,35 @@ def flatten_json_content(json_node, buffer=None):
     tag = json_node["tag"]
     text = json_node["text"]
     attrs = json_node["attributes"]
+    is_tail = json_node.get("is_tail", False)
 
-    label = f"[{tag.upper()}]"
-    attr_info = " ".join([f'{k}="{v}"' for k, v in attrs.items()])
+    # Inline tags (no labels)
+    inline_tags = {"b", "ph", "i", "u", "span", "code", "em", "strong"}
 
-    line = f"{label} {text} {attr_info}".strip()
+    # 1. HANDLE TAIL NODES
+    if is_tail:
+        # Append tail text directly (no new line)
+        if text:
+            buffer.append(text)
+        return buffer
+
+    # 2. HANDLE INLINE TAGS
+    is_inline = (tag in inline_tags)
+
+    # Label only for block tags
+    label = "" if is_inline else f"[{tag.upper()}]" if tag else ""
+
+    # Attributes except class
+    attr_info = " ".join([f'{k}="{v}"' for k, v in attrs.items()]) if attrs else ""
+
+    # Build line
+    line_parts = [label, text, attr_info]
+    line = " ".join(part for part in line_parts if part).strip()
+
     if line:
         buffer.append(line)
 
+    # 3. RECURSIVE CHILD PROCESSING
     for child in json_node["children"]:
         flatten_json_content(child, buffer)
 
