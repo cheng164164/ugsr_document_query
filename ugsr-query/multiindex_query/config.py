@@ -15,22 +15,22 @@ ENV_VARS = {
 # Feature On/Off flags
 feature_flags = {
     "debug_mode": False,   # Set to True to enable debug prints
-    "index_suggestion": False,  # Set to True to enable index suggestion based on query
-    "metadata_search": False,     # Set to True to enable metadata-only search for relevant queries
+    "index_suggestion": True,  # Set to True to enable index suggestion based on query
+    "metadata_search": True,     # Set to True to enable metadata-only search for relevant queries
     "parallel_queries": True,  # Set to True to enable parallel queries to multiple indexes
     "custom_ranking": True,   # Set to True to enable custom ranking (vector + keyword); False to use Azure default ranking
     "use_prev_context": True,    # Set to True to enable the feature that uses previous queries as context
     "hide_ref_relevance": True,    # Set to True to hide relevance explanation in the reference section
     "dynamic_filtering": False,   # Set to True to enable dynamic metadata filtering based on query keywords
     "keywords_matching": False,   # Set to True to enable keyword matching check and warning 
-    "hide_ref_contact": True,    # Set to True to hide reference contact
+    "hide_ref_contact": False,    # Set to True to hide reference contact
     "strict_mode": False,  # Set to True to enable strict model for ensuring query is explicitly answered by the retrieved context 
-    "mock_db": True    # Set to True to use mock DB functions for testing without actual DB connection
+    "mock_db": False    # Set to True to use mock DB functions for testing without actual DB connection
 }
 
 ######################### Chatbot Config ######################################
 ### Chatbot Kimmi
-'''
+
 # Define mutli indexes names to search
 chatbot_name = "Kimmi"
 
@@ -70,7 +70,7 @@ index_aliases = {
     "all_regions_index": ["all regions", "all region", "regions all", "region all"],
     "policy_center_index": ["policy center", "policy-center"]
 }
-'''
+
 ######################### Chatbot Config ######################################
 
 '''
@@ -107,7 +107,7 @@ index_aliases = {}
 
 
 ######################### Chatbot Config ######################################
-
+'''
 ### Chatbot LDGN
 chatbot_name = "LDGN"
 
@@ -124,3 +124,4 @@ supplement_files = {}
 
 # Aliases for each index to catch user queries that mention library/index by name
 index_aliases = {}
+'''

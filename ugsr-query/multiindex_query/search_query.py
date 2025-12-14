@@ -14,7 +14,7 @@ import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags, chatbot_name
 from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, resolve_reference_name, truncate_history,tokenizer, extract_structured_filenames
-
+import numpy as np
 
 set_env_vars(ENV_VARS)
 # Load environment variables
@@ -133,81 +133,6 @@ def decompose_query(query: str, debug: bool = False) -> list[str]:
         return [query]
     
 
-def select_relevant_indexes_via_llm(query, index_metadata_summaries: dict, top_n: int = 2) -> list[str]:
-    """
-    Use LLM to select the top N most relevant indexes for the given query based on metadata summaries.
-    """
-    if not index_metadata_summaries:
-        return []
-
-    client = AzureOpenAI(
-            azure_endpoint=AZURE_OPENAI_ENDPOINT,
-            api_key=AZURE_OPENAI_API_KEY,
-            api_version="2024-12-01-preview"
-        )
-    
-    prompt = f"""
-            You are a document routing assistant.
-
-            Your task is to evaluate the user's question and determine which document indexes are **most likely** to contain information related to that question, based on metadata summaries of each index.
-            The index metadata summaries provide a brief overview of the topics, terms. Keywords matching is good indicator of relevance, but also consider related concepts and synonyms. 
-            Important:
-            - You are **not** answering the user's question.
-            - You are **not** checking if the answer is guaranteed to exist.
-            - You are simply ranking which indexes are most likely to be useful based on their description and scope.
-            - You must assign a score between 1 and 10 to each index (10 = highly relevant, 1 = not relevant).
-            - Return the top 1 or 2 indexes based on these scores.
-
-            User query:
-            \"{query}\"
-
-            Available indexes and their metadata summaries:
-            """
-    for index_name, summary in index_metadata_summaries.items():
-        prompt += f"- {index_name}: {summary}\n"
-
-    prompt += """
-            Return a JSON object with the following structure:
-
-            {
-            "ranked": [["index_name", score], ...],
-            "selected": ["top_index", "optional_second_index_if_close"]
-            }
-
-            "ranked" is a list of all indexes with their scores, sorted from highest to lowest score. Even the highest score is 10, all indexes should be included in the "ranked" list. 
-            Only include the second index in \"selected\" if its score is at least 70% of the top one.
-            Do not return an empty list. Use only the index names provided above.
-            Make sure to vary the scores meaningfully. Do not assign all indexes the same score.
-            """
-    
-    try:
-        response = client.chat.completions.create(
-        model="o4-mini",
-        messages=[
-        {"role": "system", "content": "You are a helpful assistant that selects document indexes based on metadata relevance."},
-        {"role": "user", "content": prompt}
-        ]
-        )
-
-        content = response.choices[0].message.content.strip()
-        parsed = json.loads(content)
-
-        selected = parsed.get("selected", [])
-        ranked = parsed.get("ranked", [])
-
-        logging.info("📊 LLM index ranking scores: " + "; ".join([f"{name}: {score}" for name, score in ranked]))
-        valid = [idx for idx in selected if idx in index_metadata_summaries]
-        if not valid:
-            logging.warning("⚠️ LLM returned no valid selected indexes, falling back to top 2.")
-            return list(index_metadata_summaries.keys())[:2]
-
-        return valid[:2]
-
-    except Exception as e:
-        logging.warning(f"⚠️ LLM index selection failed: {e}")
-        return []  # Fallback
-    
-
 def filter_relevant_history(current_query, query_history, answer_history):
     """
     Filters relevant user-bot turns from chat history based on the current query.
@@ -286,6 +211,7 @@ def rewrite_query_with_history(current_query, relevant_history_text):
 
     system_prompt = (
         "You are a smart query rewriter that creates a clear and self-contained version of a user's intent.\n"
+        "You should never assume the user is referring to video games, pop culture, or unrelated general knowledge unless it's clearly stated. Focus strictly on mechanical, industrial, or Komatsu-related topics."
         "The user may respond with clarifying statements, follow-up questions, or additional details.\n"
         "You are given:\n"
         "- The current user input (which may be a question or clarification)\n"
@@ -354,6 +280,155 @@ def llm_search_query_optimizer(query, rewrited_query, use_previous_context):
 
     optimized_query = response.choices[0].message.content.strip().lower()
     return optimized_query
+
+
+def embed_query_for_routing(query: str):
+    client = AzureOpenAI(
+        api_key=AZURE_OPENAI_API_KEY,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_version="2024-12-01-preview"
+    )
+    resp = client.embeddings.create(
+        model=AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+        input=query
+    )
+    return np.array(resp.data[0].embedding, dtype=np.float32)
+
+
+def select_indexes_by_cluster_embeddings(query, cluster_embeddings, top_n=1):
+    try:
+        qvec = embed_query_for_routing(query)
+
+        sims = []
+        for index, vec in cluster_embeddings.items():
+            vec_np = np.array(vec, dtype=np.float32)
+            cos_sim = np.dot(qvec, vec_np) / (
+                np.linalg.norm(qvec) * np.linalg.norm(vec_np)
+            )
+            sims.append((index, cos_sim))
+
+        sims.sort(key=lambda x: x[1], reverse=True)
+        return [idx for idx, _ in sims[:top_n]]
+
+    except Exception as e:
+        logging.error(f"Embedding-based index routing failed: {e}")
+        return []
+
+
+def select_relevant_indexes_via_llm(query, index_metadata_summaries: dict, top_n: int = 2) -> list[str]:
+    """
+    Use LLM to select the top N most relevant indexes for the given query based on metadata summaries.
+    """
+    if not index_metadata_summaries:
+        return []
+
+    client = AzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version="2024-12-01-preview"
+        )
+    
+    prompt = f"""
+            You are a document routing assistant.
+            Your task is to evaluate the user's question and determine which document indexes are **most likely** to contain information related to that question, based on metadata summaries of each index.
+            The index metadata summaries provide a brief overview of the topics, terms. Keywords matching is good indicator of relevance, but also consider related concepts and synonyms. 
+            Important:
+            - You are **not** answering the user's question.
+            - You are **not** checking if the answer is guaranteed to exist.
+            - You are simply ranking which indexes are most likely to be useful based on their description and scope.
+            - You must assign a score between 1 and 10 to each index (10 = highly relevant, 1 = not relevant).
+            - Return the top 1 or 2 indexes based on these scores.
+
+            User query:
+            \"{query}\"
+
+            Available indexes and their metadata summaries:
+            """
+    for index_name, summary in index_metadata_summaries.items():
+        prompt += f"- {index_name}: {summary}\n"
+
+    prompt += """
+            Return a JSON object with the following structure:
+
+            {
+            "ranked": [["index_name", score], ...],
+            "selected": ["top_index", "optional_second_index_if_close"]
+            }
+
+            "ranked" is a list of all indexes with their scores, sorted from highest to lowest score. Even the highest score is 10, all indexes should be included in the "ranked" list. 
+            Only include the second index in \"selected\" if its score is at least 70% of the top one.
+            Do not return an empty list. Use only the index names provided above.
+            Make sure to vary the scores meaningfully. Do not assign all indexes the same score.
+            """
+    
+    try:
+        response = client.chat.completions.create(
+        model="o4-mini",
+        messages=[
+        {"role": "system", "content": "You are a helpful assistant that selects document indexes based on metadata relevance."},
+        {"role": "user", "content": prompt}
+        ]
+        )
+
+        content = response.choices[0].message.content.strip()
+        parsed = json.loads(content)
+
+        selected = parsed.get("selected", [])
+        ranked = parsed.get("ranked", [])
+
+        logging.info("📊 LLM index ranking scores: " + "; ".join([f"{name}: {score}" for name, score in ranked]))
+        valid = [idx for idx in selected if idx in index_metadata_summaries]
+        if not valid:
+            logging.warning("⚠️ LLM returned no valid selected indexes, falling back to top 2.")
+            return list(index_metadata_summaries.keys())[:2]
+
+        return valid[:2]
+
+    except Exception as e:
+        logging.warning(f"⚠️ LLM index selection failed: {e}")
+        return []  # Fallback
+
+
+def merge_routing_signals(embedding_results, sampling_results):
+    """
+    embedding_results: list of 2 indexes (always)
+    sampling_results: list of up to 2 indexes
+    """
+    # Normalize
+    E = embedding_results or []
+    S = sampling_results or []
+
+    # Not enough embedding data
+    if len(E) == 0:
+        return S
+    if len(E) == 1:
+        return list(dict.fromkeys([E[0]] + S))
+
+    e1, e2 = E[0], (E[1] if len(E) > 1 else None)
+    s1 = S[0] if len(S) > 0 else None
+
+    # --------------------------------------------
+    # RULE 1 — Double confirmation (strongest)
+    # --------------------------------------------
+    if s1 and e1 == s1:
+        return [e1]
+
+    # --------------------------------------------
+    # RULE 2 — Overlap between embeddings and sampling
+    # --------------------------------------------
+    overlap = set(E) & set(S)
+    if overlap:
+        return [idx for idx in E[:2]]
+
+    # --------------------------------------------
+    # RULE 3 — No overlap → use E[0], E[1], S[0]
+    # --------------------------------------------
+    if s1:
+        return [e1, e2, s1]
+
+    # If sampling empty, fallback to embedding only
+    return [e1, e2]
+
 
 
 def get_query_embedding(query):
@@ -533,6 +608,7 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
             "role": "system",
             "content": (
                 "You are a validation agent. Your job is to decide if the provided CONTEXT truly answers the USER QUESTION.\n"
+                "You should never assume the user is referring to video games, pop culture, or unrelated general knowledge unless it's clearly stated. Focus strictly on mechanical, industrial, or Komatsu-related topics.\n"
                 "Be strict. If the context uses different terms, systems, or services than the question, reply 'no'.\n"
                 "Only consider exact term matches. \n"
                 "Do not infer or guess intent beyond what the context supports. Do NOT introduce unrelated interpretations of words based on common alternative meanings.\n"
@@ -540,7 +616,7 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
                 "Your reply must start with 'yes' or 'no'. Then give a brief reason why.\n"
                 "If your answer is 'no', also include a short summary (1–2 sentences) of what the context is actually about — but DO NOT mention any unrelated definitions or meanings of the words.(eg:, cranes)\n"
                 "For example, if the USER QUESTION mentions 'crane', and the context is about lifting equipment, do not mention bird species.\n"
-                "The purpose of explainaton is also to help guide the user toward a more appropriate query.\n"
+                "The purpose of explanation is also to help guide the user toward a more appropriate query.\n"
                 "If the query partially matches certain keywords in the CONTEXT, prompt the user for clarification, but ONLY based on the meaning used within the CONTEXT.\n"
                 "If answer is 'no', end the short summary by asking: 'Would you like to clarify your question?'"
                 "Do not reference any specific document in your explanation. Your explanation should be general and should not mention Doc1, Doc2, etc., even if they appear in the context."
@@ -552,10 +628,11 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
             "role": "system",
             "content": (
                 "You are a supportive assistant helping users determine if their query can be answered with the available CONTEXT.\n"
+                "You should never assume the user is referring to video games, pop culture, or unrelated general knowledge unless it's clearly stated. Focus strictly on mechanical, industrial, or Komatsu-related topics.\n"
                 "Be flexible — if the query is somehow related to the topic of context, or any keyword or phrase partially match, answer 'yes'.\n"
                 "Only when the query is totally unrelated with the topic of context, answer 'no' with a brief explanation and suggest the closest match if possible.\n"
                 "Always try to assist even with keywords or partial match.\n"
-                "Reply must start with 'yes' or 'no'. If answer is 'no', end the explanation by asking: 'Would you like to clarify your question?' if answer is 'no'.\n"
+                "Reply must start with 'yes' or 'no'. If answer is 'no', end the explanation by asking: 'Would you like to clarify your question?'.\n"
                 "Do not reference any specific document in your explanation. Your explanation should be general and should not mention Doc1, Doc2, etc., even if they appear in the context."
             )
         }
@@ -757,8 +834,8 @@ def summarize_metadata_per_index(index_name, query, relevant_history_text, docs)
         messages=[{"role": "user", "content": prompt}]
     )
     summary = completion.choices[0].message.content.strip()
-    
-    return   f"---\📚 Index: {index_name}\n\n {summary}\n---"         
+
+    return   f"---\📚 Index: {share_point_urls[index_name]['name']}\n\n {summary}\n---"         
 
 
 def summarize_full_metadata(query, relevant_history_text, metadata_by_index, parallel=True):
@@ -776,7 +853,7 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index, par
 
     index_docs = [(index_name, docs) for index_name, docs in metadata_by_index.items() if docs]
     if not index_docs:
-        return "Sorry, no relevant metadata found."
+        return f"Sorry, no relevant metadata found.\n\n\n\n{reference_links}"
 
     if parallel and len(index_docs) > 1:
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -794,12 +871,12 @@ def summarize_full_metadata(query, relevant_history_text, metadata_by_index, par
     if len(all_responses) == 1:
         return f"**Answer:**\n\n{all_responses[0]}\n\n\n\n{reference_links}"  # No need to call LLM to summarize combined results
 
-    combined_summary = summarize_combined_metadata_results(query, all_responses)
+    combined_summary = summarize_combined_metadata_results(query, index_docs, all_responses)
 
     return f"**Answer:**\n\n{combined_summary} \n\n\n\n{reference_links}"
 
 
-def summarize_combined_metadata_results(query, raw_summaries: list):
+def summarize_combined_metadata_results(query, index_docs, raw_summaries: list):
     non_empty = [
         s for s in raw_summaries
         if "(No relevant metadata found" not in s and s.strip()
@@ -808,23 +885,41 @@ def summarize_combined_metadata_results(query, raw_summaries: list):
     if not non_empty:
         return "Sorry, I cannot help with it. Please try looking it up on the SharePoint links."
 
-    combined_input = "\n\n".join(non_empty)
+    displayed_names = []  # List of SharePoint display names for the user
+    for (idx, _) in index_docs:
+        displayed_names.append(share_point_urls[idx]["name"])
 
-    system_prompt = (
-        "You are a summarization assistant that combines metadata results across document libraries.\n"
-        "You are given raw summaries of relevant documents grouped by index.\n"
-        "\n"
-        "Your job is to:\n"
-        "- Remove any irrelevant or empty responses\n"
-        "- Merge similar items if duplicates exist\n"
-        "- Present a clear, final summary answering the user query\n"
-        "- Organize items logically (grouped by index if helpful)\n"
-        "- Use bullet points or clean formatting\n"
-        "\n"
-        "DO NOT invent entries. Only use what is in the raw results."
+    combined_input = "\n\n".join(raw_summaries)
+
+    header = (
+        f"Results include documents from the following indexes: {', '.join(displayed_names)}\n\n"
+        "Below is the combined list of results, grouped by index:\n\n"
     )
 
-    user_prompt = f"USER QUERY:\n{query}\n\nRAW METADATA RESULTS:\n{combined_input}"
+    system_prompt = (
+        "You are a metadata summarization assistant.\n\n"
+        "CRITICAL RULES:\n"
+        "- You must NOT alter, rename, or remove any library headings.\n"
+        "- The headings look like: '📚 Index: <SharePoint Name>'. Leave them exactly as they appear.\n"
+        "- You MUST NOT introduce new library names.\n"
+        "- You MUST NOT generate an introduction or explanation.\n"
+        "- DO NOT reorder library sections.\n"
+        "- DO NOT restate library names.\n"
+        "- ONLY refine and clean the bullet lists under each existing heading.\n"
+        "- DO NOT generate new bullets not based on raw results.\n"
+        "- DO NOT add any lines outside the blocks.\n"
+        "- Maintain section separators ('---') as provided.\n\n"
+        "Your output must preserve this structure:\n\n"
+        "---\n📚 Index: <Library Name>\n<cleaned bullet items>\n---\n"
+        "---\n📚 Index: <Another Library>\n<cleaned bullet items>\n---\n\n"
+        "Do NOT add any other text."
+    )
+
+    user_prompt = (
+        f"USER QUERY:\n{query}\n\n"
+        f"RAW METADATA RESULTS:\n{combined_input}\n\n"
+        "**Generate ONLY the grouped summary body. DO NOT write any introduction.**"
+    )
 
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
@@ -840,7 +935,8 @@ def summarize_combined_metadata_results(query, raw_summaries: list):
         ]
     )
 
-    return completion.choices[0].message.content.strip()
+    llm_body = completion.choices[0].message.content.strip()
+    return header + llm_body
 
 
 
@@ -1255,20 +1351,18 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
             # Map selected_doc_tags -> filenames
             recommended_filenames = {tag_lookup[tag] for tag in selected_doc_tags if tag in tag_lookup}
 
-            # Fallback to top_chunks[0] if nothing selected
-            if not recommended_filenames:
-                recommended_filenames = {doc.get("filename", "N/A") for doc in top_chunks[:2]}
+            # Fallback to top_chunks[:2] if nothing selected
+            if recommended_filenames:
+                main_answer += ("\n\n---\n Please refer to the following document(s) for helpful information.")
 
-            main_answer += ("\n\n---\n Please refer to the following document(s) for helpful information.")
+                for filename in list(recommended_filenames)[:2]:
+                    doc = doc_groups.get(filename, {})
+                    resolved_filename = resolve_reference_name(filename, supplement_files)
+                    url_value = resolve_reference_url(filename, (doc.get("url") or "").split(";")[0].strip(), supplement_files)
 
-            for filename in list(recommended_filenames)[:2]:
-                doc = doc_groups.get(filename, {})
-                resolved_filename = resolve_reference_name(filename, supplement_files)
-                url_value = resolve_reference_url(filename, (doc.get("url") or "").split(";")[0].strip(), supplement_files)
-
-                main_answer += f"\n\n**Resource**: [{title_case_filename(resolved_filename)}]({url_value})"
-                if not hide_ref_contact:
-                    main_answer += f"\n\n**Key Contact**: {title_case_name(doc.get('key_contact', 'N/A'))}"
+                    main_answer += f"\n\n**Resource**: [{title_case_filename(resolved_filename)}]({url_value})"
+                    if not hide_ref_contact:
+                        main_answer += f"\n\n**Key Contact**: {title_case_name(doc.get('key_contact', 'N/A'))}"
 
         if warning_msg:
             main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
@@ -1276,6 +1370,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
 
     # === CASE: Valid context — build answer using tags ===
     instructions = [
+        "You should never assume the user is referring to video games, pop culture, or unrelated general knowledge unless it's clearly stated. Focus strictly on mechanical, industrial, or Komatsu-related topics.",
         "- Be concise",
         "- You must use only the information explicitly stated in the document chunks.",
         "- Do not make assumptions, guesses, or inferences beyond the content.",
@@ -1293,7 +1388,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
         "    • The operator must press the emergency stop button. (Doc2)",
         "    • The hydraulic fluid should be replaced every 1000 hours. (Doc5)",
         "- Never use \"see DocX\", \"as shown in DocX\", or any other format.",
-        "- Never group multiple document references together. If you are referencing more than one document, use separate tags like (Doc1), (Doc2), (Doc3) — not (Doc1, Doc2).",
+        "- Never group multiple document references together. If you are referencing more than one document, use separate tags like (Doc1), (Doc2), (Doc3) — not (Doc1, Doc2) or (Doc1 and Doc2).",
         "- Do NOT use any other format like 'See Doc1', 'as shown in Doc2', 'in Doc1' or simply reference without parentheses.",
         "- If your answer describes a process, include step-by-step instructions using bullet symbols.",
         "- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink.",
@@ -1333,6 +1428,23 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
     # Clean tag references from main_answer
     main_answer = re.sub(r"\(Doc\d+\)", "", main_answer)
     main_answer = re.sub(r"\n\s*\n", "\n\n", main_answer).strip()
+
+    # === OPTIONAL: Add image links if filenames are mentioned ===
+    image_pattern = re.compile(
+            r'\b([A-Za-z0-9_\-\.]+\.(?:jpg|jpeg|png|gif|bmp|webp))\b',
+            re.IGNORECASE
+        )
+
+    mentioned_images = list(set(image_pattern.findall(main_answer)))
+    if mentioned_images:
+        image_section = "\n\n**Related Images:**\n"
+        for img_name in mentioned_images:
+            try:
+                image_url = generate_blob_sas_url(connection_string=AZURE_BLOB_CONN_STRING, container_name="ldgn-documents", blob_name=img_name)
+                image_section += f"- [View Image: {img_name}]({image_url})\n"
+            except Exception as e:
+                logging.warning(f"Failed to generate image URL for {img_name}: {e}")
+        main_answer += image_section
 
     # Build reference section, max 3
     reference_text = "\n\n**References:**\n"

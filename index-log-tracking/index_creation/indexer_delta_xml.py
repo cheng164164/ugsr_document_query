@@ -93,6 +93,7 @@ def retry_embedding_with_backoff(embedder, texts: List[str], max_retries=5):
 
 
 def get_existing_chunks(search_client: SearchClient, filename: str):
+    filename = filename.replace("'", "''")  # Escape single quotes for Azure Search
     results = search_client.search(
         search_text="*",
         filter=f"filename eq '{filename}'",

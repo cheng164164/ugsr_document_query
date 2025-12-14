@@ -44,6 +44,10 @@ MAX_TOTAL_TOKENS = 16000
 EXPECTED_COMPLETION_TOKENS = 1000
 MAX_INPUT_TOKENS = MAX_TOTAL_TOKENS - EXPECTED_COMPLETION_TOKENS
 
+_cached_cluster_profiles = None
+_cached_cluster_embeddings = None
+_cached_metadata_summaries = None
+
 
 def title_case_filename(filename):
     try:
@@ -270,61 +274,95 @@ def save_json_to_blob(blob_conn_str, container_name, blob_name, data):
 
 
 def load_json_from_blob(blob_conn_str, container_name, blob_name):
-    client = BlobServiceClient.from_connection_string(blob_conn_str)
-    blob = client.get_blob_client(container=container_name, blob=blob_name)
-    if blob.exists():
-        stream = blob.download_blob()
-        return json.loads(stream.readall())
-    return None
-
-
-def build_index_metadata_summary(index_name, sample_size=30):
-    url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{index_name}/docs/search?api-version=2024-07-01"
-    headers = {
-        "Content-Type": "application/json",
-        "api-key": AZURE_SEARCH_KEY
-    }
-
-    select_fields = ["terms", "topics"]
-    payload = {
-        "search": "*",
-        "top": sample_size,
-        "select": ",".join(select_fields),
-        "queryType": "simple",
-    }
-
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code != 200:
-            logging.warning(f"⚠️ Failed to query index '{index_name}': {response.text}")
-            return ""
-        docs = response.json().get("value", [])
-        collected = {f: [] for f in select_fields}
-        for doc in docs:
-            for f in select_fields:
-                val = doc.get(f)
-                if isinstance(val, list):
-                    collected[f].extend(val)
-                elif isinstance(val, str):
-                    collected[f].append(val)
-        summary_parts = []
-        for f, vals in collected.items():
-            if vals:
-                summary_parts.append(f"{f}: {', '.join(vals)}")
-
-        return ". ".join(summary_parts)
+        client = BlobServiceClient.from_connection_string(blob_conn_str)
+        blob = client.get_blob_client(container=container_name, blob=blob_name)
+        if not blob.exists():
+            return None
+        return json.loads(blob.download_blob().readall())
     except Exception as e:
-        logging.error(f"❌ Error building summary for {index_name}: {e}")
-        return ""
+        logging.error(f"❌ Failed loading {blob_name}: {e}")
+        return None
 
-# --- Initialize summaries (load or create) ---
-def get_or_build_metadata_summaries(index_names, blob_conn_str, container_name, blob_name):
-    summaries = load_json_from_blob(blob_conn_str, container_name, blob_name)
-    if summaries:
-        return summaries
 
-    logging.info("⚙️ metadata_summaries.json not found. Building new summaries...")
-    summaries = {index: build_index_metadata_summary(index) for index in index_names}
-    save_json_to_blob(blob_conn_str, container_name, blob_name, summaries)
-    logging.info("✅ Saved new metadata summaries to blob.")
+def load_cluster_profiles_and_embeddings(blob_conn_str):
+    global _cached_cluster_profiles, _cached_cluster_embeddings
+
+    if (_cached_cluster_profiles is not None 
+        and _cached_cluster_embeddings is not None):
+        return _cached_cluster_profiles, _cached_cluster_embeddings
+
+    profiles = load_json_from_blob(
+        blob_conn_str,
+        "index-metadata-summary",
+        "clustered_profiles.json"
+    )
+
+    embeddings = load_json_from_blob(
+        blob_conn_str,
+        "index-metadata-summary",
+        "clustered_profile_embeddings.json"
+    )
+
+    if not profiles or not embeddings:
+        logging.warning("⚠ Clustered profiles or embeddings missing, using empty dicts.")
+        profiles, embeddings = {}, {}
+
+    _cached_cluster_profiles = profiles
+    _cached_cluster_embeddings = embeddings
+
+    return profiles, embeddings
+
+
+def load_index_metadata_summaries(blob_conn_str):
+    """Loads metadata_summaries.json from Blob Storage
+    and caches it briefly for performance."""
+    global _cached_metadata_summaries
+
+
+    # use cached version if recent
+    if _cached_metadata_summaries is not None:
+        return _cached_metadata_summaries
+
+    summaries = load_json_from_blob(
+        blob_conn_str,
+        "index-metadata-summary",
+        "metadata_summaries.json"
+    )
+
+    if not summaries:
+        logging.warning("⚠ metadata_summaries.json missing in blob! Using empty dict.")
+        summaries = {}
+
+    _cached_metadata_summaries = summaries
     return summaries
+
+
+def is_meaningful_metadata_answer(ans: str) -> bool:
+    """Detects whether metadata summary is meaningful or too vague."""
+    if not ans:
+        return False
+
+    lowered = ans.lower()
+
+    # common signs of empty/unhelpful metadata summaries
+    bad_signals = [
+        "no relevant", 
+        "cannot find", 
+        "sorry", 
+        "not available", 
+        "no metadata", 
+        "no information", 
+        "i cannot help",
+        "please try looking it up",
+        "i don't have access"
+    ]
+
+    if any(sig in lowered for sig in bad_signals):
+        return False
+
+    # Require at least some content
+    if len(ans.strip()) < 50:
+        return False
+
+    return True

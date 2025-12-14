@@ -13,7 +13,7 @@ import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, index_aliases, feature_flags
 from .search_query import *
-from .util import detect_specific_index, get_or_build_metadata_summaries
+from .util import detect_specific_index, is_meaningful_metadata_answer, load_cluster_profiles_and_embeddings, load_index_metadata_summaries
 
 
 debug_mode = feature_flags["debug_mode"]
@@ -30,7 +30,6 @@ strict_mode = feature_flags.get("strict_mode", False)
 mock_db = feature_flags["mock_db"]
 
 BLOB_CONN_STR = os.getenv("AZURE_BLOB_CONN_STRING")
-INDEX_METADATA_SUMMARIES = None  # global cache
 
 if mock_db:
     from .db_utils import save_chat, fetch_recent_history
@@ -39,13 +38,6 @@ else:
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    global INDEX_METADATA_SUMMARIES
-    if INDEX_METADATA_SUMMARIES is None:
-        INDEX_METADATA_SUMMARIES = get_or_build_metadata_summaries(index_names, 
-                                                                   BLOB_CONN_STR, 
-                                                                   container_name='index-metadata-summary', 
-                                                                   blob_name='metadata_summaries.json')
-
     logging.info('Python HTTP trigger function processed a request.')
     try:
         req_body = req.get_json()
@@ -83,13 +75,31 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         if len(index_names) == 1:
             target_indexes = index_names
         else:
+            # Load precomputed metadata summaries
+            INDEX_METADATA_SUMMARIES = load_index_metadata_summaries(BLOB_CONN_STR)
+
+            # Load clustered profiles + embeddings
+            CLUSTER_PROFILES, CLUSTER_EMBEDDINGS = load_cluster_profiles_and_embeddings(BLOB_CONN_STR)
+
+            # 1) Keyword matching via alias → strongest signal
             target_index_by_keyword = detect_specific_index(query, index_aliases)
             if target_index_by_keyword:
                 target_indexes = [target_index_by_keyword]
                 logging.info(f"🔍 LLM-suggested indexes by keyword matching: {target_indexes}")
+            # 2️) No keyword match — use suggestion methods if enabled
             elif index_suggestion:
-                target_indexes = select_relevant_indexes_via_llm(query, INDEX_METADATA_SUMMARIES, top_n=2)
-                logging.info(f"📚 LLM-suggested indexes by metadata summaries: {target_indexes}")
+                # Sampling-based LLM index suggestion
+                sampling_suggestions = select_relevant_indexes_via_llm(query, INDEX_METADATA_SUMMARIES, top_n=2)
+                logging.info(f"🧪 Sampling-based suggestions: {sampling_suggestions}")
+
+                # Embedding-based cluster profile similarity
+                embedding_suggestions = select_indexes_by_cluster_embeddings(query, CLUSTER_EMBEDDINGS, top_n=2)
+                logging.info(f"🤖 Embedding-based suggestions: {embedding_suggestions}")
+
+                # Merge results
+                target_indexes = merge_routing_signals(embedding_suggestions, sampling_suggestions)
+
+            # 3️) index_suggestion is disabled → search all indexes
             else:
                 target_indexes = index_names
                 logging.info(f"📚 No index suggestion, searching all indexes: {target_indexes}")
@@ -119,6 +129,61 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 subquery_answer_map = dict(zip(sub_queries, subquery_results))
                 llm_summary = combine_subquery_answers(subquery_answer_map, cleaned_query)
 
+            # ------------------------------
+            # FALLBACK LOGIC
+            # ------------------------------
+            if not is_meaningful_metadata_answer(llm_summary):
+                logging.warning("⚠️ Metadata search returned weak/empty result. Falling back to content search.")
+
+                # perform content search instead
+                search_scope = target_indexes if target_indexes else index_names
+                parallel_flag = parallel_queries if len(search_scope) > 1 else False
+
+                def process_content_subquery(subq):
+                    docs = multi_index_search_documents(
+                        cleaned_query,
+                        rewrited_query,
+                        search_scope,
+                        vector_weight=0.6,
+                        top_k=8,
+                        dynamic_filtering=dynamic_filtering,
+                        keywords_matching=keywords_matching,
+                        custom_ranking=custom_ranking,
+                        use_previous_context=use_prev_context,
+                        parallel=parallel_flag,
+                        debug=debug_mode
+                    )
+                    if not docs:
+                        return "No relevant documents found."
+
+                    return multi_index_generate_response(
+                        subq, docs,
+                        hide_ref_relevance=hide_ref_relevance,
+                        hide_ref_contact=hide_ref_contact,
+                        strict_mode=strict_mode
+                    )
+
+                if len(sub_queries) == 1:
+                    fallback_answer = process_content_subquery(sub_queries[0])
+                else:
+                    if parallel_queries:
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            fallback_results = list(executor.map(process_content_subquery, sub_queries))
+                    else:
+                        fallback_results = [process_content_subquery(sq) for sq in sub_queries]
+
+                    fallback_answer = combine_subquery_answers(
+                        dict(zip(sub_queries, fallback_results)),
+                        cleaned_query
+                    )
+
+                save_chat(user_id, user_name, "bot", fallback_answer, metadata)
+                return func.HttpResponse(
+                    json.dumps({"answer": fallback_answer}, ensure_ascii=False, indent=2),
+                    mimetype="application/json", status_code=200
+                )
+            
+            # If metadata answer *is* meaningful → return it normally
             try:
                 save_chat(user_id, user_name, "bot", llm_summary, metadata)
             except Exception as e:
@@ -137,7 +202,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"🔍 Searching indexes: {search_scope} | Parallel: {parallel_flag}")
 
         def process_content_subquery(subq):
-            docs = multi_index_search_documents(cleaned_query, rewrited_query, search_scope, vector_weight=0.6, top_k=8, 
+            docs = multi_index_search_documents(cleaned_query, rewrited_query, search_scope, vector_weight=0.6, top_k=6, 
                                                                 dynamic_filtering=dynamic_filtering, 
                                                                 keywords_matching = keywords_matching,
                                                                 custom_ranking=custom_ranking,
@@ -146,7 +211,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                                                                 debug=debug_mode)
             
             if not docs:
-                return func.HttpResponse("No relevant documents found.", status_code=404)
+                return "No relevant documents found."
             return multi_index_generate_response(subq, docs, hide_ref_relevance=hide_ref_relevance, hide_ref_contact=hide_ref_contact, strict_mode=strict_mode)
         
         if len(sub_queries) == 1:

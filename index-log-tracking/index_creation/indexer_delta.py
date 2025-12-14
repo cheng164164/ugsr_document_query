@@ -27,7 +27,7 @@ from azure.search.documents.indexes.models import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
-from openai import AzureOpenAI, RateLimitError
+from openai import AzureOpenAI, APIError, APITimeoutError, RateLimitError, InternalServerError
 from pytz import timezone
 
 
@@ -206,6 +206,26 @@ def document_read(sas_url, azure_doc_intell_endpoint, azure_doc_intell_key, file
         return result.content 
 
 
+def retry_llm_with_backoff(call_fn, max_retries=8, base_delay=5):
+    """
+    call_fn: lambda that performs the OpenAI call
+    Retries on: rate limits, timeouts, 500s, and transient network/API failures.
+    """
+    delay = base_delay
+    for attempt in range(max_retries):
+        try:
+            return call_fn()
+        except (RateLimitError, APITimeoutError, APIError, InternalServerError, ConnectionError) as e:
+            print(f"⚠️ LLM rate limit / transient failure: {e}. Retry {attempt+1}/{max_retries} in {delay}s...")
+            time.sleep(delay)
+            delay = min(delay * 2, 60)  # exponential backoff capped at 60 seconds
+        except Exception as e:
+            print(f"❌ Non-retryable LLM error: {e}")
+            raise
+
+    raise RuntimeError("❌ LLM failed after maximum retries.")
+
+
 def obtain_topics(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version):
     client = AzureOpenAI(
         azure_endpoint=azure_oai_endpoint,
@@ -213,11 +233,14 @@ def obtain_topics(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployme
         api_version=azure_openai_api_version,
     )
     messages = [{"role": "user", "content": f"Obtain all the main topics mentioned in this document. Keep your response short and just include the topics. Also, include the scope and purpose. Here is the document Content: {context}"}]
-    completion = client.chat.completions.create(
-        model=azure_oai_deployment_model,
-        messages=messages
-    )
-    return completion.choices[0].message.content
+    
+    def call():
+        completion = client.chat.completions.create(
+            model=azure_oai_deployment_model,
+            messages=messages
+        )
+        return completion.choices[0].message.content
+    return retry_llm_with_backoff(call)
 
 def obtain_key_terms(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version):
     client = AzureOpenAI(
@@ -226,11 +249,15 @@ def obtain_key_terms(context, azure_oai_endpoint, azure_oai_key, azure_oai_deplo
         api_version=azure_openai_api_version,
     )
     messages = [{"role": "user", "content": f"Obtain key terminology used in this document. Keep your response short and just include the terms. Here is the document Content: {context}"}]
-    completion = client.chat.completions.create(
-        model=azure_oai_deployment_model,
-        messages=messages
-    )
-    return completion.choices[0].message.content
+    
+    def call():
+        completion = client.chat.completions.create(
+            model=azure_oai_deployment_model,
+            messages=messages
+        )
+        return completion.choices[0].message.content
+    return retry_llm_with_backoff(call)
+
 
 def obtain_summary(context, azure_oai_endpoint, azure_oai_key, azure_oai_deployment_model, azure_openai_api_version):
     client = AzureOpenAI(
@@ -239,11 +266,15 @@ def obtain_summary(context, azure_oai_endpoint, azure_oai_key, azure_oai_deploym
         api_version=azure_openai_api_version,
     )
     messages = [{"role": "user", "content": f"Obtain the summary of the document. Keep your response short under 200 words. Here is the document Content: {context}"}]
-    completion = client.chat.completions.create(
-        model=azure_oai_deployment_model,
-        messages=messages
-    )
-    return completion.choices[0].message.content
+    
+    def call():
+        completion = client.chat.completions.create(
+            model=azure_oai_deployment_model,
+            messages=messages
+        )
+        return completion.choices[0].message.content
+    return retry_llm_with_backoff(call)
+
 
 def truncate_summary(text, max_chars=4000):
     if len(text) <= max_chars:
@@ -276,16 +307,20 @@ def obtain_version_and_publish_date(context, azure_oai_endpoint, azure_oai_key, 
         }
     ]
 
-    try:
+    def call():
         completion = client.chat.completions.create(
             model=azure_oai_deployment_model,
             messages=messages
         )
-        result = completion.choices[0].message.content.strip()
-        parsed = json.loads(result)
+        return completion.choices[0].message.content
+
+    try:
+        raw = retry_llm_with_backoff(call)
+        parsed = json.loads(raw)
         return parsed.get("version"), parsed.get("publish_date")
     except Exception as e:
         return None, None
+
 
 
 def save_metadata_to_blob(new_metadata_df, conn_str, container, blob_name):
@@ -349,6 +384,7 @@ def retry_embedding_with_backoff(embedder, texts: List[str], max_retries=5):
 
 def get_existing_chunks(search_client: SearchClient, filename: str) -> Dict[str, Dict]:
     """Fetch existing chunk docs for a filename from the index. Returns mapping id -> {chunk_id, content_sha256}."""
+    filename = filename.replace("'", "''")  # Escape single quotes for Azure Search
     results = search_client.search(
         search_text="*",
         filter=f"filename eq '{filename.lower()}'",

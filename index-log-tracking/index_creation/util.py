@@ -15,6 +15,7 @@ from azure.search.documents import SearchClient
 from .config import INDEX_CONFIGS, ENV_VARS, SCHEMA_MAPPING_DICT, enable_delta_updates, enable_grouping
 
 
+
 def set_env_vars(ENV_VARS=None):
     """
     Set environment variables for Azure/OpenAI config.

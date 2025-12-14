@@ -22,7 +22,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         queue_name = os.getenv("QUEUE_NAME")
         queue_client = QueueClient.from_connection_string(conn_str, queue_name)
 
-        batch_size =30 # adjust as needed
+        batch_size = 100 # adjust as needed
 
         if enable_grouping:
             logging.info("🧩 Group-by-group mode is ENABLED.")
