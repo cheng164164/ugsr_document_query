@@ -6,14 +6,15 @@ import json
 from openai import AzureOpenAI
 import requests
 import re
-from datetime import datetime, timedelta
-from azure.storage.blob import BlobServiceClient, BlobClient, generate_blob_sas, BlobSasPermissions
+from azure.storage.blob import BlobClient
 import json
 import io
 import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags, chatbot_name
-from .util import set_env_vars, title_case_filename, title_case_name, resolve_reference_url, resolve_reference_name, truncate_history,tokenizer, extract_structured_filenames
+from .util import (extract_structured_filenames, set_env_vars, title_case_filename, title_case_name, resolve_reference_url, 
+                   resolve_reference_name, truncate_history,tokenizer, extract_structured_filenames, append_images_to_answer,
+                   generate_blob_sas_url)
 import numpy as np
 
 set_env_vars(ENV_VARS)
@@ -540,23 +541,6 @@ def cosine_similarity(vec1, vec2):
     return dot / (norm1 * norm2 + 1e-8)
 
 
-def generate_blob_sas_url(connection_string, container_name, blob_name):
-    blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-
-    account_key = blob_service_client.credential.account_key
-    sas_token = generate_blob_sas(
-        account_name=blob_client.account_name,
-        container_name=container_name,
-        blob_name=blob_name,
-        account_key=account_key,
-        permission=BlobSasPermissions(read=True),
-        expiry=datetime.utcnow() + timedelta(hours=1)
-    )
-
-    return f"{blob_client.url}?{sas_token}"
-
-
 def should_use_metadata_search(query):
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
@@ -909,9 +893,6 @@ def summarize_combined_metadata_results(query, index_docs, raw_summaries: list):
         "- DO NOT generate new bullets not based on raw results.\n"
         "- DO NOT add any lines outside the blocks.\n"
         "- Maintain section separators ('---') as provided.\n\n"
-        "Your output must preserve this structure:\n\n"
-        "---\n📚 Index: <Library Name>\n<cleaned bullet items>\n---\n"
-        "---\n📚 Index: <Another Library>\n<cleaned bullet items>\n---\n\n"
         "Do NOT add any other text."
     )
 
@@ -1287,7 +1268,12 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
     return final_answer
 '''
 
-def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_contact, strict_mode=False):
+def multi_index_generate_response(query, context, 
+                                  hide_ref_relevance, 
+                                  hide_ref_contact, 
+                                  show_image, 
+                                  show_title_in_ref,
+                                  strict_mode=False):
     from collections import OrderedDict
     import re
 
@@ -1305,6 +1291,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
     for idx, doc in enumerate(top_chunks):
         tag = f"Doc{idx + 1}"
         filename = doc.get("filename", "N/A")
+        title = doc.get("title")
         content = doc.get("content", "")
         score = doc.get('_final_score', 0)
         context_texts.append(f"[{tag}] {content}")
@@ -1315,6 +1302,7 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
         if filename not in doc_groups:
             doc_groups[filename] = {
                 "document_name": filename,
+                "title": title,   
                 "url": url,
                 "key_contact": doc.get("owner", "N/A"),
                 "key_topics": doc.get("topics", ""),
@@ -1357,10 +1345,16 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
 
                 for filename in list(recommended_filenames)[:2]:
                     doc = doc_groups.get(filename, {})
-                    resolved_filename = resolve_reference_name(filename, supplement_files)
+                    # Choose display title or filename
+                    if show_title_in_ref and doc.get("title"):
+                        display_name = doc["title"]
+                    else:
+                        display_name = title_case_filename(
+                            resolve_reference_name(filename, supplement_files)
+                        )
                     url_value = resolve_reference_url(filename, (doc.get("url") or "").split(";")[0].strip(), supplement_files)
 
-                    main_answer += f"\n\n**Resource**: [{title_case_filename(resolved_filename)}]({url_value})"
+                    main_answer += f"\n\n**Resource**: [{display_name}]({url_value})"
                     if not hide_ref_contact:
                         main_answer += f"\n\n**Key Contact**: {title_case_name(doc.get('key_contact', 'N/A'))}"
 
@@ -1429,22 +1423,10 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
     main_answer = re.sub(r"\(Doc\d+\)", "", main_answer)
     main_answer = re.sub(r"\n\s*\n", "\n\n", main_answer).strip()
 
-    # === OPTIONAL: Add image links if filenames are mentioned ===
-    image_pattern = re.compile(
-            r'\b([A-Za-z0-9_\-\.]+\.(?:jpg|jpeg|png|gif|bmp|webp))\b',
-            re.IGNORECASE
-        )
 
-    mentioned_images = list(set(image_pattern.findall(main_answer)))
-    if mentioned_images:
-        image_section = "\n\n**Related Images:**\n"
-        for img_name in mentioned_images:
-            try:
-                image_url = generate_blob_sas_url(connection_string=AZURE_BLOB_CONN_STRING, container_name="ldgn-documents", blob_name=img_name)
-                image_section += f"- [View Image: {img_name}]({image_url})\n"
-            except Exception as e:
-                logging.warning(f"Failed to generate image URL for {img_name}: {e}")
-        main_answer += image_section
+    # === OPTIONAL IMAGE LINKS (NOW A SEPARATE FUNCTION) ===
+    if show_image:
+        main_answer = append_images_to_answer(main_answer, show_image)
 
     # Build reference section, max 3
     reference_text = "\n\n**References:**\n"
@@ -1455,11 +1437,15 @@ def multi_index_generate_response(query, context, hide_ref_relevance, hide_ref_c
         if ref_count >= 3:
             break
         ref_count += 1
-        
-        document_name = title_case_filename(resolve_reference_name(doc['document_name'], supplement_files))
+        # Use title or filename
+        if show_title_in_ref and doc.get("title"):
+            document_display = doc["title"]
+        else:
+            document_display = title_case_filename(
+                resolve_reference_name(doc["document_name"], supplement_files)
+            )
         url_value = resolve_reference_url(doc['document_name'], (doc.get("url") or "").split(";")[0].strip(), supplement_files)
-
-        reference_text += f"\n---\n**Resource**: [{document_name}]({url_value})\n\n"
+        reference_text += f"\n---\n**Resource**: [{document_display}]({url_value})\n\n"
 
         if not hide_ref_contact:
             key_contact = title_case_name(doc['key_contact'])
@@ -1551,7 +1537,7 @@ def answer_general_question(query: str, index_keyterms_summary: dict):
     f"Context:\n{general_context}\n\n"
     f"{index_summary_context}\n\n"
     f"Question: {query}\n\n"
-    "Answer the question clearly and concisely, mentioning relevant topics or indexes if needed."
+    "Answer the question clearly and concisely, mentioning relevant topics or indexes if needed. if <index_summary_context> has nothing relevant to the question, just say 'Sorry, I don't have information about that. Could you please provide more details or clarify your question?'"
     )
 
     completion = client.chat.completions.create(

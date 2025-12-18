@@ -151,8 +151,8 @@ SCHEMA_MAPPING_DICT = {
 INDEX_CONFIGS = [
     {
         "index_name": "ldgn_index",
-        "metadata_container": "",
-        "metadata_blob": "",
+        "metadata_container": "ldgn-documents-metadata",
+        "metadata_blob": "ldgn_metadata_new.csv",
         "document_container": "ldgn-documents",
         "group": 1,
         "is_xml": True

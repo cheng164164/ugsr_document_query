@@ -11,23 +11,26 @@ import json
 import io
 import openpyxl
 import pandas as pd
-from .config import ENV_VARS, index_names, metadata_files, share_point_urls, index_aliases, feature_flags
+from .config import ENV_VARS, chatbot_name, index_names, metadata_files, share_point_urls, index_aliases, feature_flags, chatbot_feature_overrides
 from .search_query import *
-from .util import detect_specific_index, is_meaningful_metadata_answer, load_cluster_profiles_and_embeddings, load_index_metadata_summaries
+from .util import detect_specific_index, is_meaningful_metadata_answer, load_cluster_profiles_and_embeddings, load_index_metadata_summaries, get_feature_flags
 
 
-debug_mode = feature_flags["debug_mode"]
-index_suggestion = feature_flags.get("index_suggestion", True)
-parallel_queries = feature_flags["parallel_queries"]
-keywords_matching = feature_flags["keywords_matching"]
-custom_ranking = feature_flags["custom_ranking"]
-dynamic_filtering = feature_flags["dynamic_filtering"]
-metadata_search = feature_flags["metadata_search"]
-use_prev_context = feature_flags["use_prev_context"]
-hide_ref_relevance = feature_flags["hide_ref_relevance"]
-hide_ref_contact = feature_flags['hide_ref_contact']
-strict_mode = feature_flags.get("strict_mode", False)
-mock_db = feature_flags["mock_db"]
+FLAGS = get_feature_flags(chatbot_name, feature_flags, chatbot_feature_overrides)
+debug_mode = FLAGS["debug_mode"]
+index_suggestion = FLAGS.get("index_suggestion", True)
+parallel_queries = FLAGS["parallel_queries"]
+keywords_matching = FLAGS["keywords_matching"]
+custom_ranking = FLAGS["custom_ranking"]
+dynamic_filtering = FLAGS["dynamic_filtering"]
+metadata_search = FLAGS["metadata_search"]
+use_prev_context = FLAGS["use_prev_context"]
+hide_ref_relevance = FLAGS["hide_ref_relevance"]
+hide_ref_contact = FLAGS['hide_ref_contact']
+show_image = FLAGS["show_image"]
+show_title_in_ref = FLAGS["show_title_in_ref"]
+strict_mode = FLAGS.get("strict_mode", False)
+mock_db = FLAGS["mock_db"]
 
 BLOB_CONN_STR = os.getenv("AZURE_BLOB_CONN_STRING")
 
@@ -160,6 +163,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                         subq, docs,
                         hide_ref_relevance=hide_ref_relevance,
                         hide_ref_contact=hide_ref_contact,
+                        show_image=show_image,
+                        show_title_in_ref=show_title_in_ref,
                         strict_mode=strict_mode
                     )
 
@@ -192,6 +197,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
         if use_metadata_search_flag == "general":
+            INDEX_METADATA_SUMMARIES = load_index_metadata_summaries(BLOB_CONN_STR)
             llm_summary = answer_general_question(rewrited_query, index_keyterms_summary=INDEX_METADATA_SUMMARIES)
             save_chat(user_id, user_name, "bot", llm_summary, metadata)       
             return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
@@ -212,7 +218,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             
             if not docs:
                 return "No relevant documents found."
-            return multi_index_generate_response(subq, docs, hide_ref_relevance=hide_ref_relevance, hide_ref_contact=hide_ref_contact, strict_mode=strict_mode)
+            return multi_index_generate_response(subq, docs, 
+                                                 hide_ref_relevance=hide_ref_relevance, 
+                                                 hide_ref_contact=hide_ref_contact, 
+                                                 show_image=show_image, 
+                                                 show_title_in_ref=show_title_in_ref,
+                                                 strict_mode=strict_mode)
         
         if len(sub_queries) == 1:
             ai_response = process_content_subquery(sub_queries[0])

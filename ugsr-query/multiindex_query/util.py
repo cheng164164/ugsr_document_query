@@ -2,17 +2,18 @@ import os
 import re
 import pandas as pd
 import logging
+import base64
 from tiktoken import get_encoding
+from datetime import datetime, timedelta
 from openai import AzureOpenAI
 import pyodbc
 import json
 import time
 import requests
-from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions, ContentSettings, BlobClient
 from collections import Counter
 from typing import List
 from .config import ENV_VARS
-
 
 
 def set_env_vars(ENV_VARS=None):
@@ -47,6 +48,35 @@ MAX_INPUT_TOKENS = MAX_TOTAL_TOKENS - EXPECTED_COMPLETION_TOKENS
 _cached_cluster_profiles = None
 _cached_cluster_embeddings = None
 _cached_metadata_summaries = None
+
+
+def get_feature_flags(chatbot_name: str, global_feature_flags: dict, chatbot_feature_overrides: dict) -> dict:
+    """
+    Returns the final feature flags for the chatbot.
+    
+    Rules:
+    - If global debug_mode=True → return global flags unchanged.
+    - Otherwise → merge global flags with chatbot-specific overrides.
+    - Chatbot-specific flag "debug_mode" is ALWAYS forced to False for deployment.
+    """
+    global_flags = global_feature_flags.copy()
+    global_debug = global_flags.get("debug_mode", False)
+
+    # If global debug mode is ON → use global flags only
+    if global_debug:
+        return global_flags
+
+    # Apply chatbot overrides if they exist
+    bot_overrides = chatbot_feature_overrides.get(chatbot_name, {})
+    final_flags = global_flags.copy()
+
+    for key, value in bot_overrides.items():
+        final_flags[key] = value
+
+    # Chatbot debug_mode ALWAYS false
+    final_flags["debug_mode"] = False
+
+    return final_flags
 
 
 def title_case_filename(filename):
@@ -366,3 +396,85 @@ def is_meaningful_metadata_answer(ans: str) -> bool:
         return False
 
     return True
+
+
+def generate_blob_sas_url(connection_string, container_name, blob_name):
+    blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+
+    account_key = blob_service_client.credential.account_key
+    sas_token = generate_blob_sas(
+        account_name=blob_client.account_name,
+        container_name=container_name,
+        blob_name=blob_name,
+        account_key=account_key,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.utcnow() + timedelta(hours=1)
+    )
+
+    return f"{blob_client.url}?{sas_token}"
+
+
+def append_images_to_answer(main_answer, show_image=False):
+    """
+    Shows inline Base64 images first,
+    then shows clickable image links in a separate section.
+    """
+
+    if not show_image:
+        return main_answer
+
+    image_pattern = re.compile(
+        r'\b([A-Za-z0-9_\-\.]+\.(?:jpg|jpeg|png|gif|bmp|webp))\b',
+        re.IGNORECASE
+    )
+    mentioned_images = list(set(image_pattern.findall(main_answer)))
+    if not mentioned_images:
+        return main_answer
+
+    # sections in correct order
+    inline_section = "\n\n"
+    link_section   = "\n\n**Full Resolution Images:**\n"
+
+    for img_name in mentioned_images:
+        sas_url = None
+
+        # always produce link
+        try:
+            sas_url = generate_blob_sas_url(
+                connection_string=AZURE_BLOB_CONN_STRING,
+                container_name="ldgn-documents",
+                blob_name=img_name
+            )
+            link_section += f"- [{img_name}]({sas_url})\n"
+        except Exception as e:
+            logging.warning(f"SAS URL failed for {img_name}: {e}")
+
+        # try inline image
+        try:
+            blob_client = BlobClient.from_connection_string(
+                conn_str=AZURE_BLOB_CONN_STRING,
+                container_name="ldgn-documents",
+                blob_name=img_name
+            )
+            img_bytes = blob_client.download_blob().readall()
+
+            # determine mime
+            ext = img_name.lower().split(".")[-1]
+            mime = f"image/{'jpeg' if ext in ['jpg','jpeg'] else ext}"
+
+            # encode base64
+            b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+            # add inline displayed image
+            inline_section += (
+                f'\n<img src="data:{mime};base64,{b64}" '
+                f'alt="{img_name}" style="max-width:420px; border-radius:6px;" />\n'
+            )
+
+        except Exception as e:
+            logging.warning(f"Inline image render failed for {img_name}: {e}")
+
+    return main_answer + inline_section
+
+
