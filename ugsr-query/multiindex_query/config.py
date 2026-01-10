@@ -25,7 +25,7 @@ feature_flags = {
     "keywords_matching": False,   # Set to True to enable keyword matching check and warning 
     "strict_mode": False,  # Set to True to enable strict model for ensuring query is explicitly answered by the retrieved context
     "show_image": False,  # Set to True to enable images in the reference section
-    "show_title_in_ref": True,    # Set to True to show title in reference section
+    "show_title_in_ref": False,    # Set to True to show title in reference section
     "hide_ref_contact": True,    # Set to True to hide reference contact
     "mock_db": True    # Set to True to use mock DB functions for testing without actual DB connection
 }
@@ -37,6 +37,7 @@ chatbot_feature_overrides = {
         "index_suggestion": True,
         "metadata_search": True,
         "hide_ref_contact": False,
+        "show_title_in_ref": False,
         "mock_db": False
     },
 
@@ -44,6 +45,7 @@ chatbot_feature_overrides = {
         "index_suggestion": False,
         "metadata_search": False,
         "hide_ref_contact": True,
+        "show_title_in_ref": False,
         "mock_db": True
     },
     
@@ -58,7 +60,7 @@ chatbot_feature_overrides = {
 }
 ######################### Chatbot Config ######################################
 ### Chatbot Kimmi
-'''
+
 # Define mutli indexes names to search
 chatbot_name = "Kimmi"
 
@@ -98,7 +100,7 @@ index_aliases = {
     "all_regions_index": ["all regions", "all region", "regions all", "region all"],
     "policy_center_index": ["policy center", "policy-center"]
 }
-'''
+
 ######################### Chatbot Config ######################################
 
 '''
@@ -135,7 +137,7 @@ index_aliases = {}
 
 
 ######################### Chatbot Config ######################################
-
+'''
 ### Chatbot LDGN
 chatbot_name = "LDGN"
 
@@ -152,3 +154,4 @@ supplement_files = {}
 
 # Aliases for each index to catch user queries that mention library/index by name
 index_aliases = {}
+'''

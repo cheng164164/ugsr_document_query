@@ -69,29 +69,47 @@ def clean_query_for_llm(raw_query, route_keywords={"metadata", "content", "conte
 
 def decompose_query(query: str, debug: bool = False) -> list[str]:
     prompt = f"""
-        You are an expert assistant that decomposes complex multi-part questions into smaller, independent sub-questions—**but only when necessary**.
-        Your rules:
-        - If the input question is already focused, specific, or atomic, return it as a single-item list.
-        - Break it into multiple sub-questions if the question clearly involves multiple steps, tasks, or clauses joined with words like “and,” “then,” “first... next...,” or is clearly a compound query.
-        - Words like "what, how, who, why, when, where, which" often indicate separate sub-questions. You can decompose based on these cues.
-        - Some questions may refer to more than one concept (e.g. “risks and mitigation strategies”), but if these are tightly related and part of the same topic, do **not** split them. 
-          Only decompose when the question naturally contains multiple distinct tasks or inquiries.
-        - Do **not** over-explain or expand single question or sub-questions, preserve the original phrasing of them.
-        - If you decompose into multiple questions, ensure each sub-question is fully self-contained.
-        - Avoid using pronouns like "these", "those", "they", or "it" that depend on previous sub-questions.
-        - Instead, restate the referenced concept explicitly in the sub-question.
-        
-        Examples:
-        Q: "What are the risks and mitigation strategies for cloud migration?"
-        → ["What are the risks and mitigation strategies for cloud migration?"]
-        Q: "Who is the design owner for GMNR Auth Group and what is the design owner responsible for global controlled design?"
-        → ["Who is the design owner for GMNR Auth Group?", "What is the design owner responsible for in global controlled design?"]
-        Q: "How do I perform a software release test?"
-        → ["How do I perform a software release test?"]
-        Q: "First I want to extract the data, then clean it, and finally store it."
-        → ["How do I extract the data?", "How do I clean the data?", "How do I store the data?"]
-        Respond ONLY with a JSON array of sub-questions, no code fences, no commentary. Do NOT use ```json or any markdown formatting.
-        User question: "{query}"
+    You are an expert assistant that decomposes complex multi-part questions into smaller, independent sub-questions — **but only when it is clearly necessary**.
+
+    Your behavior:
+    - Most user inputs are *single* questions or short phrases. For those, you must **not** change anything.
+    - If the input is already a single focused question or a short phrase, return a JSON array with **exactly one element**, which is the original text copied character-for-character.
+    - Only decompose into multiple sub-questions if it is **obviously** composed of multiple distinct questions or steps.
+
+    Decomposition rules (when it *is* clearly multi-part):
+    - Break it into multiple sub-questions if the question clearly involves multiple steps, tasks, or clauses joined with words like “and”, “then”, “first... next...”, etc.
+    - Multiple WH-words ("what, how, who, why, when, where, which") can indicate separate sub-questions.
+    - If the concepts are tightly related and naturally part of one question (e.g. “risks and mitigation strategies for cloud migration”), do **not** split them.
+    - When you do split, each sub-question must be fully self-contained.
+    - Avoid pronouns like "these", "those", "they", or "it" that depend on earlier context; restate the referenced concept explicitly.
+    - Do **not** expand, rephrase, summarize, or add explanations to any question text. Keep each sub-question minimal and as close as possible to the original wording.
+
+    Formatting:
+    - Respond **only** with a JSON array of strings, no markdown, no comments, no extra keys.
+    - For single/atomic inputs, the array must be: ["<original user text>"] with the text copied exactly.
+
+    Examples:
+
+    Input: "What are the risks and mitigation strategies for cloud migration?"
+    → ["What are the risks and mitigation strategies for cloud migration?"]
+
+    Input: "Who is the design owner for GMNR Auth Group and what is the design owner responsible for global controlled design?"
+    → ["Who is the design owner for GMNR Auth Group?",
+        "What is the design owner responsible for in global controlled design?"]
+
+    Input: "How do I perform a software release test?"
+    → ["How do I perform a software release test?"]
+
+    Input: "First I want to extract the data, then clean it, and finally store it."
+    → ["How do I extract the data?",
+        "How do I clean the data?",
+        "How do I store the data?"]
+
+    Now process this input. Remember:
+    - If it is not clearly multi-part, return a **single-element array** with the original text exactly.
+    - Otherwise, decompose as described above.
+
+    User question: "{query}"
     """.strip()
 
     client = AzureOpenAI(
@@ -250,14 +268,25 @@ def rewrite_query_with_history(current_query, relevant_history_text):
         return current_query
 
 
-def llm_search_query_optimizer(query, rewrited_query, use_previous_context):
-    system_prompt = f"You are a search query optimizer. \
-        Read the user question and extract the key words to generate search queries to improve semantic matching for vector search.\
-        Make sure your rewritten query includes all important original terms (do not drop any).\
-        but also add relevant synonyms and related descriptions.\
-        Remove stopwords.\
-        Return a single line of plain text that expands the original query, not a list. Do not return JSON, quotes, or explanations"
-
+def llm_search_query_optimizer(query):
+    """
+    Turn a natural-language question into a short, search-optimized query.
+    General behavior:
+    - Remove 'how do I', 'what is', 'can you', etc.
+    - Keep key nouns/phrases (skills, competencies, topics).
+    - Add a few related terms, but stay short.
+    """
+    system_prompt = (
+        "You are a search query normalizer.\n"
+        "Input is a natural language question.\n"
+        "You must output a SINGLE, short search query that captures the main subject.\n"
+        "Rules:\n"
+        "- Remove helper phrases like 'how do I', 'what is', 'can you', 'please help me with'.\n"
+        "- Keep important nouns and noun phrases (skills, competencies, topics, tools).\n"
+        "- It's OK to add 1-3 related words (synonyms or context like 'course', 'training', 'resources') if helpful.\n"
+        "- Do NOT return a full sentence.\n"
+        "- Do NOT add explanations, JSON, or quotes. Return plain text only."
+    )
 
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
@@ -265,22 +294,15 @@ def llm_search_query_optimizer(query, rewrited_query, use_previous_context):
         api_version="2024-12-01-preview"
     )
 
-    if rewrited_query and use_previous_context:
-        query_input = f"Context: {rewrited_query}\nOriginal query: {query}"
-    else:
-        query_input = f"Original query: {query}"
-    
-
-    response = client.chat.completions.create(
-                        model="o3-mini",
-                        messages = [
+    resp = client.chat.completions.create(
+        model="o3-mini",
+        messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query_input}
-        ]  
-                                )
-
-    optimized_query = response.choices[0].message.content.strip().lower()
-    return optimized_query
+            {"role": "user", "content": f"Question: {query}"}
+        ]
+    )
+    canonical = resp.choices[0].message.content.strip()
+    return canonical
 
 
 def embed_query_for_routing(query: str):
@@ -936,10 +958,12 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
     vector_field = "content_embedding"
 
     filename_keywords = extract_structured_filenames(query)
-    optimized_query = llm_search_query_optimizer(query, rewrited_query, use_previous_context)
+    optimized_query = llm_search_query_optimizer(rewrited_query)
     keywords = extract_keywords(query, optimized_query, debug=feature_flags["debug_mode"]) if keywords_matching else None
     query_em = get_query_embedding(optimized_query)
-    query_em = get_query_embedding(query)
+
+    if debug:
+        print(f"🔍 Optimized search query: {optimized_query}")
 
     all_results = []
     all_content = []
@@ -959,7 +983,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
         if filename_keywords:
             search_terms = " ".join(filename_keywords)
         else:
-            search_terms = rewrited_query.lower()
+            search_terms = optimized_query.lower()
         
         url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{index_name}/docs/search?api-version=2024-07-01"
         payload = {
