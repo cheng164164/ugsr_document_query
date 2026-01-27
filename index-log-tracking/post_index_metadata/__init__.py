@@ -7,8 +7,9 @@ import numpy as np
 from sklearn.cluster import KMeans
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from openai import AzureOpenAI
-from index_creation.config import ENV_VARS, INDEX_CONFIGS
+from index_creation.config import ENV_VARS, INDEX_CONFIGS, ADDITIONAL_EMBEDDINGS
 from index_creation.util import set_env_vars
+from helper import save_json_to_blob, embed_text, build_and_save_contact_kb
 
 
 # Load environment variables from config.py
@@ -30,50 +31,6 @@ CONTAINER_NAME = "index-metadata-summary"
 BLOB_METADATA_SUMMARY = "metadata_summaries.json"
 BLOB_CLUSTERED_PROFILES = "clustered_profiles.json"
 BLOB_CLUSTERED_EMBEDDINGS = "clustered_profile_embeddings.json"
-
-
-# ------------------------------------------
-# Azure OpenAI Embedding
-# ------------------------------------------
-def embed_text(text: str, max_tokens=4000):
-    """
-    Safely embeds long text by splitting into chunks under the embedding model token limit.
-    Returns the mean-pooled embedding vector.
-    """
-    client = AzureOpenAI(
-        api_key=AZURE_OPENAI_KEY,
-        azure_endpoint=AZURE_OPENAI_ENDPOINT,
-        api_version=AZURE_OPENAI_API_VERSION,
-    )
-
-    # Split into rough token-sized chunks by words
-    words = text.split()
-    chunks = []
-    current_chunk = []
-
-    for w in words:
-        current_chunk.append(w)
-        if len(" ".join(current_chunk)) > max_tokens:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = []
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
-    print(f"📦 Embedding {len(chunks)} chunks due to token limits.")
-
-    vectors = []
-    for ch in chunks:
-        resp = client.embeddings.create(
-            model=EMBED_MODEL,
-            input=ch
-        )
-        vec = np.array(resp.data[0].embedding, dtype=np.float32)
-        vectors.append(vec)
-
-    # Mean pooling = robust global embedding
-    return np.mean(np.vstack(vectors), axis=0)
-
 
 
 # ------------------------------------------
@@ -185,31 +142,6 @@ def cluster_phrases(phrases, k=120):
     return representatives
 
 
-def save_json_to_blob(blob_conn_str, container_name, blob_name, data):
-    service_client = BlobServiceClient.from_connection_string(blob_conn_str)
-    try:
-        container_client = service_client.get_container_client(container_name)
-
-        # Ensure container exists — create if not
-        if not container_client.exists():
-            container_client.create_container()
-            logging.info(f"📦 Created missing blob container: '{container_name}'")
-
-        blob_client = container_client.get_blob_client(blob_name)
-
-        blob_client.upload_blob(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            overwrite=True,
-            content_settings=ContentSettings(content_type="application/json")
-        )
-
-        logging.info(f"✅ Uploaded blob: '{blob_name}' to container: '{container_name}'")
-
-    except Exception as e:
-        logging.error(f"❌ Failed to upload blob '{blob_name}' to container '{container_name}': {e}")
-        raise
-
-
 def build_index_metadata_summary(index_name, sample_size=30):
     url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{index_name}/docs/search?api-version=2024-07-01"
     headers = {
@@ -305,6 +237,30 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             BLOB_CLUSTERED_EMBEDDINGS, clustered_embeddings
         )
 
+        # =========================================================
+        # ✅ NEW: Run additional embedding jobs (if configured)
+        # =========================================================
+        additional_results = {}
+        if isinstance(ADDITIONAL_EMBEDDINGS, dict) and ADDITIONAL_EMBEDDINGS:
+            for job_name, job_cfg in ADDITIONAL_EMBEDDINGS.items():
+                try:
+                    logging.info(f"🔧 Running additional embedding job: {job_name}")
+                    # For now we support row-mode table KB jobs (contact lists)
+                    if job_cfg.get("record_mode") == "row":
+                        additional_results[job_name] = build_and_save_contact_kb(
+                            AZURE_BLOB_CONN_STRING, job_cfg
+                        )
+                    else:
+                        additional_results[job_name] = {
+                            "status": "skipped",
+                            "reason": f"Unsupported record_mode: {job_cfg.get('record_mode')}"
+                        }
+                except Exception as e:
+                    logging.exception(f"❌ Additional embedding job failed: {job_name}")
+                    additional_results[job_name] = {"status": "failed", "error": str(e)}
+        else:
+            logging.info("ℹ️ No ADDITIONAL_EMBEDDINGS configured; skipping extra embedding jobs.")
+
         return func.HttpResponse(
             json.dumps({
                 "status": "success",
@@ -313,6 +269,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     "metadata_summaries": BLOB_METADATA_SUMMARY,
                     "clustered_profiles": BLOB_CLUSTERED_PROFILES,
                     "clustered_embeddings": BLOB_CLUSTERED_EMBEDDINGS,
+                    "additional_embedding_jobs": additional_results
                 }
             }, indent=2),
             mimetype="application/json",

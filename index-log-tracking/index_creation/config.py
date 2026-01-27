@@ -25,7 +25,7 @@ ENV_VARS = {
 
 
 ########################################################################################
-'''
+
 #### Chatbot "Kimmi"
 INDEX_CONFIGS = [
     {
@@ -35,34 +35,34 @@ INDEX_CONFIGS = [
         "document_container": "underground-engineering-documents",
         "group": 1
     },
-    {
-        "index_name": "business_index",
-        "metadata_container": "north-america-business-documents-metadata",
-        "metadata_blob": "auto_extraction/business_metadata_new.csv",
-        "document_container": "north-america-business-documents",
-        "group": 1
-    },
-    {
-        "index_name": "all_regions_index",
-        "metadata_container": "all-regions-documents-metadata",
-        "metadata_blob": "auto_extraction/all_regions_metadata_new.csv",
-        "document_container": "all-regions-documents",
-        "group": 1
-    },
-    {
-        "index_name": "ehs_index",
-        "metadata_container": "global-ehs-documents-metadata",
-        "metadata_blob": "auto_extraction/ehs_metadata_new.csv",
-        "document_container": "global-ehs-documents",
-        "group": 2
-    },
-    {
-        "index_name": "policy_center_index",
-        "metadata_container": "policy-center-documents-metadata",
-        "metadata_blob": "auto_extraction/policy_center_metadata_new.csv",
-        "document_container": "policy-center-documents",
-        "group": 2
-    },
+    # {
+    #     "index_name": "business_index",
+    #     "metadata_container": "north-america-business-documents-metadata",
+    #     "metadata_blob": "auto_extraction/business_metadata_new.csv",
+    #     "document_container": "north-america-business-documents",
+    #     "group": 1
+    # },
+    # {
+    #     "index_name": "all_regions_index",
+    #     "metadata_container": "all-regions-documents-metadata",
+    #     "metadata_blob": "auto_extraction/all_regions_metadata_new.csv",
+    #     "document_container": "all-regions-documents",
+    #     "group": 1
+    # },
+    # {
+    #     "index_name": "ehs_index",
+    #     "metadata_container": "global-ehs-documents-metadata",
+    #     "metadata_blob": "auto_extraction/ehs_metadata_new.csv",
+    #     "document_container": "global-ehs-documents",
+    #     "group": 2
+    # },
+    # {
+    #     "index_name": "policy_center_index",
+    #     "metadata_container": "policy-center-documents-metadata",
+    #     "metadata_blob": "auto_extraction/policy_center_metadata_new.csv",
+    #     "document_container": "policy-center-documents",
+    #     "group": 2
+    # },
 ]
 
 SCHEMA_MAPPING_DICT = {
@@ -113,8 +113,36 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     },    
 }
-'''
 
+
+ADDITIONAL_EMBEDDINGS = {
+    "ugsr_contact_kb": {
+        # Where to read source tables
+        "source": {
+            "type": "blob_container",
+            "container": "underground-engineering-document-supplement",
+            "file_types": [".csv", ".xlsx", ".xls"],
+        },
+
+        # How to interpret the data
+        "record_mode": "row",
+        "max_record_chars": 4000,
+
+        # Embedding behavior
+        "embedding": {
+            "model_env": "AZURE_EMBEDDING_DEPLOYMENT_NAME",
+            "batch_size": 64,
+        },
+
+        # Output location
+        "output": {
+            "container": "index-metadata-summary",
+            "records_blob": "contacts/contact_records.jsonl",
+            "embeddings_blob": "contacts/contact_record_embeddings.npy",
+            "manifest_blob": "contacts/contact_manifest.json",
+        },
+    }
+}
 
 
 ###############################################################################
@@ -142,11 +170,13 @@ SCHEMA_MAPPING_DICT = {
         "url": "url"
     } 
 }
+
+ADDITIONAL_EMBEDDINGS = {}
 '''
 
 
 ###############################################################################
-
+'''
 #### Chatbot "LDGN"
 INDEX_CONFIGS = [
     {
@@ -171,3 +201,6 @@ SCHEMA_MAPPING_DICT = {
         "url": None 
     } 
 }
+
+ADDITIONAL_EMBEDDINGS = {}
+'''

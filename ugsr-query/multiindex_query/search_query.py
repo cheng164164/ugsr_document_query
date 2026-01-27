@@ -12,7 +12,7 @@ import io
 import openpyxl
 import pandas as pd
 from .config import ENV_VARS, index_names, metadata_files, share_point_urls, supplement_files, feature_flags, chatbot_name
-from .util import (extract_structured_filenames, set_env_vars, title_case_filename, title_case_name, resolve_reference_url, 
+from .util import (extract_structured_filenames, set_env_vars, strip_doc_references, title_case_filename, title_case_name, resolve_reference_url, 
                    resolve_reference_name, truncate_history,tokenizer, extract_structured_filenames, append_images_to_answer,
                    generate_blob_sas_url)
 import numpy as np
@@ -72,13 +72,14 @@ def decompose_query(query: str, debug: bool = False) -> list[str]:
     You are an expert assistant that decomposes complex multi-part questions into smaller, independent sub-questions — **but only when it is clearly necessary**.
 
     Your behavior:
-    - Most user inputs are *single* questions or short phrases. For those, you must **not** change anything.
-    - If the input is already a single focused question or a short phrase, return a JSON array with **exactly one element**, which is the original text copied character-for-character.
+    - Most user inputs are *single* question or short phrases. For those, you must **not** change anything or add any extra text to the query.
+    - If the input is already a single focused question or a short phrase, return a JSON array with exactly one element, which is the original query copied character-for-character.
     - Only decompose into multiple sub-questions if it is **obviously** composed of multiple distinct questions or steps.
 
     Decomposition rules (when it *is* clearly multi-part):
     - Break it into multiple sub-questions if the question clearly involves multiple steps, tasks, or clauses joined with words like “and”, “then”, “first... next...”, etc.
     - Multiple WH-words ("what, how, who, why, when, where, which") can indicate separate sub-questions.
+    - A question mark (?) usually indicates the end of a question; multiple question marks suggest multiple questions.
     - If the concepts are tightly related and naturally part of one question (e.g. “risks and mitigation strategies for cloud migration”), do **not** split them.
     - When you do split, each sub-question must be fully self-contained.
     - Avoid pronouns like "these", "those", "they", or "it" that depend on earlier context; restate the referenced concept explicitly.
@@ -575,12 +576,13 @@ def should_use_metadata_search(query):
             "role": "system",
             "content": (
                 f"You are a router. Your job is to decide whether a query should be answered by:\n"
-                f"- metadata: Only if it asks for listing of metadata terms such as filenames, titles, document types, categories, release version, revision date, release data of the documents in the resources etc.\n"
+                f"- contact: questions asking for point of contact, contact person, technical expert, representative, owner/backup of a BUSINESS AREA / PRODUCT / APPLICATION (from contact lists)\n"
+                f"- metadata: Only if it asks for listing of metadata terms such as filenames, titles, document types, categories, release version, revision date, release data, document owner(s) of the documents in the resources etc.\n"
                 f"- semantic: If the query asks for listing of terms outside of above metadata terms, or it needs detailed answers or summaries from document content.\n"
                 f"- general: If the query asks about the general topics, scopes, functionalities, capabilities or logistic questions of the chatbot." 
                 f"For example general questions like 'what can you help with?', 'what is {chatbot_name}', 'how can i use {chatbot_name}?', 'what are the questions that you can answer?'etc.\n"
                 f"If the query contains words like 'metadata', choose metadata. If the query contains words like 'content', choose semantic.\n"
-                f"Only reply with one word: 'metadata' or 'semantic' or 'general'."
+                f"Only reply with one word: 'contact' or 'metadata' or 'semantic' or 'general'."
             )
         },
         {
@@ -1355,9 +1357,7 @@ def multi_index_generate_response(query, context,
         )
 
         # Clean tag markers from explanation ((DocN), [DocN], etc.)
-        main_answer = re.sub(r"\(Doc\d+\)", "", main_answer)
-        main_answer = re.sub(r"\[Doc\d+\]", "", main_answer)  # also remove [DocN] if used
-        main_answer = re.sub(r"\n\s*\n", "\n\n", main_answer).strip()
+        main_answer = strip_doc_references(main_answer)
 
         if not is_completely_irrelevant and top_chunks:
             # Map selected_doc_tags -> filenames
@@ -1435,8 +1435,7 @@ def multi_index_generate_response(query, context,
 
     print("* Generated raw Main Answer *:", main_answer)
     # Identify which tags were referenced
-    referenced_tags = set(re.findall(r"\(Doc\d+\)", main_answer))
-    referenced_tags = {tag.strip("()") for tag in referenced_tags}
+    referenced_tags = set(re.findall(r"Doc\d+", main_answer))
     referenced_files = {tag_lookup[tag] for tag in referenced_tags if tag in tag_lookup}
 
     # Fallback: if no (DocN) tags were referenced, fallback to top chunk
@@ -1444,8 +1443,7 @@ def multi_index_generate_response(query, context,
         referenced_files = {doc.get("filename", "N/A") for doc in top_chunks[:2]}
 
     # Clean tag references from main_answer
-    main_answer = re.sub(r"\(Doc\d+\)", "", main_answer)
-    main_answer = re.sub(r"\n\s*\n", "\n\n", main_answer).strip()
+    main_answer = strip_doc_references(main_answer)
 
 
     # === OPTIONAL IMAGE LINKS (NOW A SEPARATE FUNCTION) ===

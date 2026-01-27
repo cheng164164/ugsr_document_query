@@ -85,9 +85,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             CLUSTER_PROFILES, CLUSTER_EMBEDDINGS = load_cluster_profiles_and_embeddings(BLOB_CONN_STR)
 
             # 1) Keyword matching via alias → strongest signal
-            target_index_by_keyword = detect_specific_index(query, index_aliases)
-            if target_index_by_keyword:
-                target_indexes = [target_index_by_keyword]
+            target_indexes_by_keyword = detect_specific_index(query, index_aliases)
+            if target_indexes_by_keyword:
+                target_indexes = target_indexes_by_keyword
                 logging.info(f"🔍 LLM-suggested indexes by keyword matching: {target_indexes}")
             # 2️) No keyword match — use suggestion methods if enabled
             elif index_suggestion:

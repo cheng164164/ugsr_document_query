@@ -12,7 +12,7 @@ import time
 import requests
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions, ContentSettings, BlobClient
 from collections import Counter
-from typing import List
+from typing import List, Dict, Optional
 from .config import ENV_VARS
 
 
@@ -93,30 +93,64 @@ def title_case_filename(filename):
         return filename
 
 
-def title_case_name(name):
+def title_case_name(name: str) -> str:
     try:
-        return ' '.join(part.capitalize() for part in name.strip().split())
+        if not name:
+            return name
+
+        # Split by comma or semicolon and take only the FIRST segment
+        first_part = name.replace(";", ",").split(",")[0].strip()
+
+        # Title-case each word of the selected part
+        return " ".join(word.capitalize() for word in first_part.split() if word)
     except Exception:
         return name
 
 
-def detect_specific_index(query: str, index_aliases: dict | None) -> str | None:
+def _normalize(text: str) -> str:
+    """Lowercase and collapse whitespace."""
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def detect_specific_index(
+    query: str,
+    index_aliases: Optional[Dict[str, List[str]]]
+) -> Optional[List[str]]:
     """
-    Detect if the query explicitly mentions one of the index aliases.
-    Returns the matched index name, or None if no match or if alias check should be skipped.
+    Detect all indexes whose aliases appear in the query using
+    simple full-term (phrase) matching with word boundaries.
+
+    - Returns a list of matched index names (1 or more)
+    - Returns None if no match
     """
-    # Skip if alias mapping is missing or trivial
     if not index_aliases or len(index_aliases) <= 1:
         return None
-    
-    q_lower = query.lower()
+
+    q_norm = _normalize(query)
+    matched_indexes: List[str] = []
+
     for index_name, aliases in index_aliases.items():
-        if not aliases:  # skip if aliases list is empty
+        if not aliases:
             continue
+
         for alias in aliases:
-            if alias.lower() in q_lower:
-                return index_name
-    return None
+            if not alias:
+                continue
+
+            alias_norm = _normalize(alias)
+            if not alias_norm:
+                continue
+
+            # Full phrase match with word boundaries
+            # e.g. "global ehs" -> r"\bglobal ehs\b"
+            pattern = r"\b" + re.escape(alias_norm) + r"\b"
+
+            if re.search(pattern, q_norm):
+                matched_indexes.append(index_name)
+                break  # avoid adding same index multiple times
+
+    return matched_indexes or None
+
 
 
 def resolve_reference_url(filename: str, original_url: str, supplement_files: dict) -> str:
@@ -176,6 +210,32 @@ def extract_structured_filenames(text: str, normalize: bool = True) -> List[str]
     else:
         return matches
 
+
+def strip_doc_references(text: str) -> str:
+    # 1) Remove any (...) that contains DocN, e.g.
+    #    (Doc1), (Doc1, Doc2), (refer to Doc1 and Doc2)
+    text = re.sub(r"\([^)]*Doc\d+[^)]*\)", "", text)
+
+    # 2) Remove any [...] that contains DocN, e.g.
+    #    [Doc1], [Doc1, Doc2], [refer to Doc1 and Doc2]
+    text = re.sub(r"\[[^\]]*Doc\d+[^\]]*\]", "", text)
+
+    # 3) Remove free-standing phrases like:
+    #    refer to Doc1 and Doc2
+    #    see Doc1, Doc2
+    text = re.sub(
+        r"\b(?:see|refer to|see also)\s+Doc\d+(?:\s*(?:,|and)\s*Doc\d+)*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 4) Remove any leftover standalone DocN tokens
+    text = re.sub(r"\bDoc\d+\b", "", text)
+
+    # 5) Clean up extra blank lines
+    text = re.sub(r"\n\s*\n", "\n\n", text).strip()
+    return text
 
 
 def count_tokens(text):
@@ -246,10 +306,14 @@ def fetch_recent_history(query_history, answer_history, user_id, top_n=5):
 
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT TOP (?) Direction, Content
-            FROM ChatHistory
-            WHERE UserId = ?
-            ORDER BY Timestamp_Central ASC   -- ASC so turns stay in chronological order
+            SELECT Direction, Content
+            FROM (
+                SELECT TOP (?) Direction, Content, Timestamp_Central
+                FROM ChatHistory
+                WHERE UserId = ?
+                ORDER BY Timestamp_Central DESC   -- newest first
+            ) AS recent
+            ORDER BY Timestamp_Central ASC        -- chronological for LLM
         """, (top_n, user_id))
         rows = cursor.fetchall()
 
