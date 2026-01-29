@@ -13,7 +13,10 @@ import openpyxl
 import pandas as pd
 from .config import ENV_VARS, chatbot_name, index_names, metadata_files, share_point_urls, index_aliases, feature_flags, chatbot_feature_overrides
 from .search_query import *
-from .util import detect_specific_index, is_meaningful_metadata_answer, load_cluster_profiles_and_embeddings, load_index_metadata_summaries, get_feature_flags
+from .util import (detect_specific_index, is_meaningful_metadata_answer, 
+                   load_cluster_profiles_and_embeddings, load_index_metadata_summaries, 
+                   get_feature_flags, contact_search_from_blob)
+
 
 
 FLAGS = get_feature_flags(chatbot_name, feature_flags, chatbot_feature_overrides)
@@ -202,13 +205,23 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             save_chat(user_id, user_name, "bot", llm_summary, metadata)       
             return func.HttpResponse(json.dumps({"answer": llm_summary}, ensure_ascii=False, indent=2), mimetype="application/json", status_code=200)
 
+        if use_metadata_search_flag == "contact":
+            contact_answer = contact_search_from_blob(
+                cleaned_query,
+                blob_conn_str=BLOB_CONN_STR,
+                container="index-metadata-summary",
+                prefix="contacts/"
+            )
+            save_chat(user_id, user_name, "bot", contact_answer, metadata)
+            return func.HttpResponse(json.dumps({"answer": contact_answer}, ensure_ascii=False, indent=2),mimetype="application/json", status_code=200)        
+        
         ## Step 3: Otherwise, Search all indexes and generate answer
         search_scope = target_indexes if target_indexes else index_names
         parallel_flag = parallel_queries if len(target_indexes)>1 else False
         logging.info(f"🔍 Searching indexes: {search_scope} | Parallel: {parallel_flag}")
 
         def process_content_subquery(subq):
-            docs = multi_index_search_documents(cleaned_query, subq, search_scope, vector_weight=0.6, top_k=6, 
+            docs = multi_index_search_documents(cleaned_query, subq, search_scope, vector_weight=0.6, top_k=10, 
                                                                 dynamic_filtering=dynamic_filtering, 
                                                                 keywords_matching = keywords_matching,
                                                                 custom_ranking=custom_ranking,

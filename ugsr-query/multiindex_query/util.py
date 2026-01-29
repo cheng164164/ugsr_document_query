@@ -1,4 +1,5 @@
 import os
+import io
 import re
 import pandas as pd
 import logging
@@ -9,11 +10,13 @@ from openai import AzureOpenAI
 import pyodbc
 import json
 import time
+import numpy as np
 import requests
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions, ContentSettings, BlobClient
 from collections import Counter
 from typing import List, Dict, Optional
 from .config import ENV_VARS
+from azure.core.exceptions import ResourceNotFoundError
 
 
 def set_env_vars(ENV_VARS=None):
@@ -542,3 +545,199 @@ def append_images_to_answer(main_answer, show_image=False):
     return main_answer + inline_section
 
 
+def contact_search_from_blob(
+    query: str,
+    blob_conn_str: str,
+    container: str = "index-metadata-summary",
+    prefix: str = "contacts/",
+    top_k: int = 1
+):
+    # -------------------------
+    # Helpers
+    # -------------------------
+    def load_blob_bytes(blob_conn_str, container, blob_path):
+        blob = BlobClient.from_connection_string(blob_conn_str, container, blob_path)
+        return blob.download_blob().readall()
+
+    def normalize(text):
+        return str(text).lower().strip()
+
+
+    def normalized_edit_similarity(a: str, b: str) -> float:
+        """
+        Computes normalized Levenshtein similarity: 1 - (edit_distance / max_len)
+        """
+        a = a.lower().strip()
+        b = b.lower().strip()
+        if not a or not b:
+            return 0.0
+
+        len_a, len_b = len(a), len(b)
+        dp = [[0] * (len_b + 1) for _ in range(len_a + 1)]
+
+        for i in range(len_a + 1):
+            dp[i][0] = i
+        for j in range(len_b + 1):
+            dp[0][j] = j
+
+        for i in range(1, len_a + 1):
+            for j in range(1, len_b + 1):
+                cost = 0 if a[i-1] == b[j-1] else 1
+                dp[i][j] = min(
+                    dp[i-1][j] + 1,      # deletion
+                    dp[i][j-1] + 1,      # insertion
+                    dp[i-1][j-1] + cost  # substitution
+                )
+
+        distance = dp[len_a][len_b]
+        max_len = max(len_a, len_b)
+        return 1 - (distance / max_len)
+        
+
+    def field_value_fuzzy_match(value: str, query: str, threshold: float = 0.75) -> bool:
+        """
+        Compares full field value to each query substring (phrase) using string edit similarity.
+        """
+        if not value or not query:
+            return False
+
+        value = value.lower().strip()
+        query_tokens = re.findall(r"\b\w+\b", query.lower())
+
+        if not query_tokens:
+            return False
+
+        val_len = len(value.split())
+        window_sizes = [val_len - 1, val_len, val_len + 1]
+        window_sizes = [w for w in window_sizes if w > 0]
+
+        for w in window_sizes:
+            for i in range(len(query_tokens) - w + 1):
+                span = " ".join(query_tokens[i:i+w])
+                sim = normalized_edit_similarity(span, value)
+                if sim >= threshold:
+                    return True
+
+        return False
+
+    def format_records_response(matched_records):
+        if not matched_records:
+            return "Sorry, I couldn't find any matching contact records."
+
+        lines = [f"**Answer:**\n\nMatches for your query:\n"]
+        for idx, rec in enumerate(matched_records, 1):
+            fields = rec.get("fields", {})
+            source = rec.get("source_file", "Unknown")
+            sheet = rec.get("sheet", "")
+            first = fields.get("First Name", "")
+            last = fields.get("Last Name", "")
+            full_name = f"{first} {last}".strip()
+
+            lines.append(f"---\n**Match {idx}** (From Source: `{source}`)")
+            if full_name:
+                lines.append(f"- Contact Name: {full_name}")
+            if fields.get("Email"):
+                lines.append(f"- Email: {fields['Email']}")
+
+            ignore = {"First Name", "Last Name", "Email"}
+            for k, v in fields.items():
+                if k in ignore or not v:
+                    continue
+                lines.append(f"- {k}: {str(v).strip()}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    # -------------------------
+    # Load contact records + embeddings
+    # -------------------------
+    try:
+        embeddings = np.load(io.BytesIO(load_blob_bytes(blob_conn_str, container, prefix + "contact_record_embeddings.npy")))
+        raw_records = load_blob_bytes(blob_conn_str, container, prefix + "contact_records.jsonl")
+        records = [json.loads(line) for line in raw_records.decode("utf-8").splitlines() if line.strip()]
+    except ResourceNotFoundError:
+        return "Sorry, I cannot help with that because I could not find the contact list information."
+    except Exception as e:
+        return f"Unexpected error occurred while loading contact data: {str(e)}"
+
+    # -------------------------
+    # Embed the user query
+    # -------------------------
+    try:
+        client = AzureOpenAI(
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version="2024-12-01-preview"
+        )
+
+        emb_response = client.embeddings.create(
+            model=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"),
+            input=query
+        )
+        query_vec = np.array(emb_response.data[0].embedding, dtype=np.float32)
+
+    except Exception as e:
+        return f"Failed to embed query: {str(e)}"
+
+    # -------------------------
+    # Find top-1 record by similarity
+    # -------------------------
+    try:
+        if embeddings.ndim == 1:
+            embeddings = embeddings.reshape(1, -1)
+
+        sims = np.dot(embeddings, query_vec) / (np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec) + 1e-8)
+        top_index = int(np.argmax(sims))
+        top_record = records[top_index]
+
+    except Exception as e:
+        return f"Failed to compute similarity: {str(e)}"
+
+    # -------------------------
+    # Extract overlapping fields from query
+    # -------------------------
+    query_text = normalize(query)
+    top_fields = top_record.get("fields", {})
+    matched_fields = {}
+
+    for key, value in top_fields.items():
+        if not value or not isinstance(value, str):
+            continue
+        val_norm = normalize(value)
+        if val_norm in query_text or any(val_norm in t for t in query_text.split()):
+            matched_fields[key] = value.strip()
+
+    # fallback: advanced fuzzy match using spans
+    if not matched_fields:
+        for key, value in top_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if field_value_fuzzy_match(value, query, threshold=0.75):
+                matched_fields[key] = value.strip()
+
+        # If still nothing matches → just return top-1
+        if not matched_fields:
+            return format_records_response([top_record])
+
+    # -------------------------
+    # Find all rows in same file/sheet with same column:value
+    # -------------------------
+    source_file = top_record.get("source_file", "")
+    sheet = top_record.get("sheet", "")
+    matched_rows = []
+
+    for rec in records:
+        if rec.get("source_file") != source_file or rec.get("sheet") != sheet:
+            continue
+        fields = rec.get("fields", {})
+        match_all = all(
+            normalize(fields.get(k, "")) == normalize(v)
+            for k, v in matched_fields.items()
+        )
+        if match_all:
+            matched_rows.append(rec)
+
+    # Always include the top-1 row if it wasn't in the match list
+    if top_record not in matched_rows:
+        matched_rows.insert(0, top_record)
+
+    return format_records_response(matched_rows)

@@ -71,7 +71,7 @@ def embed_text(text: str, max_tokens=4000):
 # ================================
 # ✅ NEW: Batch embedding for many short texts (records)
 # ================================
-def embed_texts_batch(texts: list[str]) -> np.ndarray:
+def embed_texts_batch(texts: list[str], max_chars: int = 8000) -> np.ndarray:
     """
     Batch embedding for speed. Returns (N, D) float32 array.
     """
@@ -80,12 +80,29 @@ def embed_texts_batch(texts: list[str]) -> np.ndarray:
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_version=AZURE_OPENAI_API_VERSION,
     )
-    resp = client.embeddings.create(
-        model=EMBED_MODEL,
-        input=texts
-    )
-    vectors = [np.array(d.embedding, dtype=np.float32) for d in resp.data]
-    return np.vstack(vectors)
+
+    # Clean inputs
+    clean = []
+    for i, t in enumerate(texts):
+        if not isinstance(t, str):
+            logging.warning(f"⚠️ Skipping non-string input at index {i}: {repr(t)[:100]}")
+            clean.append("")  # preserve shape
+            continue
+        if len(t) > max_chars:
+            logging.warning(f"⚠️ Truncating overly long input at index {i} ({len(t)} chars)")
+            t = t[:max_chars]
+        clean.append(t)
+
+    try:
+        resp = client.embeddings.create(
+            model=EMBED_MODEL,
+            input=clean
+        )
+        vectors = [np.array(d.embedding, dtype=np.float32) for d in resp.data]
+        return np.vstack(vectors)
+    except Exception as e:
+        logging.error("❌ Batch rejected by API. First 3 inputs:\n%s", json.dumps(clean[:3], ensure_ascii=False))
+        raise
 
 
 def save_json_to_blob(blob_conn_str, container_name, blob_name, data):
@@ -143,8 +160,12 @@ def _parse_table_blob_to_records(file_bytes: bytes, blob_name: str, max_chars: i
     def add_df(df: pd.DataFrame, sheet: str | None):
         if df is None or df.empty:
             return
-        df = df.replace({np.nan: ""}).fillna("").astype(str)
+        # Fix merged/empty cells by forward-filling both NaN and empty strings
+        df.replace("", np.nan, inplace=True)
+        df.fillna(method="ffill", inplace=True)
+
         df.columns = [str(c).strip() for c in df.columns]
+        df = df.astype(str)
 
         rows = df.to_dict(orient="records")
         for i, row in enumerate(rows, start=1):
@@ -171,9 +192,9 @@ def _parse_table_blob_to_records(file_bytes: bytes, blob_name: str, max_chars: i
         add_df(df, sheet=None)
     elif lower.endswith(".xlsx") or lower.endswith(".xls"):
         xls = pd.ExcelFile(io.BytesIO(file_bytes))
-        for sheet_name in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name=sheet_name)
-            add_df(df, sheet=sheet_name)
+        first_sheet = xls.sheet_names[0]  # ✅ Only take the first one
+        df = pd.read_excel(xls, sheet_name=first_sheet)
+        add_df(df, sheet=first_sheet)
     else:
         # unsupported
         return []
@@ -217,11 +238,11 @@ def build_and_save_contact_kb(blob_conn_str: str, job_cfg: dict) -> dict:
     manifest_blob = output["manifest_blob"]
 
     max_chars = int(job_cfg.get("max_record_chars", 4000))
-    batch_size = int(embed_cfg.get("batch_size", 64))
+    batch_size = int(embed_cfg.get("batch_size", 32))
 
     svc = BlobServiceClient.from_connection_string(blob_conn_str)
     src_client = svc.get_container_client(source_container)
-
+    
     if not src_client.exists():
         logging.warning(f"⚠️ Contact source container does not exist: {source_container}")
         return {"status": "skipped", "reason": "missing_source_container", "source_container": source_container}

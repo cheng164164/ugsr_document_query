@@ -35,34 +35,34 @@ INDEX_CONFIGS = [
         "document_container": "underground-engineering-documents",
         "group": 1
     },
-    # {
-    #     "index_name": "business_index",
-    #     "metadata_container": "north-america-business-documents-metadata",
-    #     "metadata_blob": "auto_extraction/business_metadata_new.csv",
-    #     "document_container": "north-america-business-documents",
-    #     "group": 1
-    # },
-    # {
-    #     "index_name": "all_regions_index",
-    #     "metadata_container": "all-regions-documents-metadata",
-    #     "metadata_blob": "auto_extraction/all_regions_metadata_new.csv",
-    #     "document_container": "all-regions-documents",
-    #     "group": 1
-    # },
-    # {
-    #     "index_name": "ehs_index",
-    #     "metadata_container": "global-ehs-documents-metadata",
-    #     "metadata_blob": "auto_extraction/ehs_metadata_new.csv",
-    #     "document_container": "global-ehs-documents",
-    #     "group": 2
-    # },
-    # {
-    #     "index_name": "policy_center_index",
-    #     "metadata_container": "policy-center-documents-metadata",
-    #     "metadata_blob": "auto_extraction/policy_center_metadata_new.csv",
-    #     "document_container": "policy-center-documents",
-    #     "group": 2
-    # },
+    {
+        "index_name": "business_index",
+        "metadata_container": "north-america-business-documents-metadata",
+        "metadata_blob": "auto_extraction/business_metadata_new.csv",
+        "document_container": "north-america-business-documents",
+        "group": 1
+    },
+    {
+        "index_name": "all_regions_index",
+        "metadata_container": "all-regions-documents-metadata",
+        "metadata_blob": "auto_extraction/all_regions_metadata_new.csv",
+        "document_container": "all-regions-documents",
+        "group": 1
+    },
+    {
+        "index_name": "ehs_index",
+        "metadata_container": "global-ehs-documents-metadata",
+        "metadata_blob": "auto_extraction/ehs_metadata_new.csv",
+        "document_container": "global-ehs-documents",
+        "group": 2
+    },
+    {
+        "index_name": "policy_center_index",
+        "metadata_container": "policy-center-documents-metadata",
+        "metadata_blob": "auto_extraction/policy_center_metadata_new.csv",
+        "document_container": "policy-center-documents",
+        "group": 2
+    },
 ]
 
 SCHEMA_MAPPING_DICT = {
@@ -120,7 +120,7 @@ ADDITIONAL_EMBEDDINGS = {
         # Where to read source tables
         "source": {
             "type": "blob_container",
-            "container": "underground-engineering-document-supplement",
+            "container": "undergroound-engineering-document-supplement",
             "file_types": [".csv", ".xlsx", ".xls"],
         },
 
@@ -131,7 +131,7 @@ ADDITIONAL_EMBEDDINGS = {
         # Embedding behavior
         "embedding": {
             "model_env": "AZURE_EMBEDDING_DEPLOYMENT_NAME",
-            "batch_size": 64,
+            "batch_size": 32,
         },
 
         # Output location

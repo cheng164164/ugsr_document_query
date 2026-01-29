@@ -9,7 +9,7 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 from openai import AzureOpenAI
 from index_creation.config import ENV_VARS, INDEX_CONFIGS, ADDITIONAL_EMBEDDINGS
 from index_creation.util import set_env_vars
-from .helper import save_json_to_blob, embed_text, build_and_save_contact_kb
+from helper import save_json_to_blob, embed_text, build_and_save_contact_kb
 
 
 # Load environment variables from config.py

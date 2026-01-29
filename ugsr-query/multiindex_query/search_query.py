@@ -1127,7 +1127,7 @@ def multi_index_search_documents(query, rewrited_query, index_names, vector_weig
                 )
 
     final_results = [doc for doc in all_results if doc["_index"] == best_index]
-    final_results = sorted(final_results, key=lambda d: d["_final_score"], reverse=True)[:8]
+    final_results = sorted(final_results, key=lambda d: d["_final_score"], reverse=True)[:top_k]
 
     warning_msg = ""
     if keywords_matching:
@@ -1450,13 +1450,13 @@ def multi_index_generate_response(query, context,
     if show_image:
         main_answer = append_images_to_answer(main_answer, show_image)
 
-    # Build reference section, max 3
+    # Build reference section, max 4
     reference_text = "\n\n**References:**\n"
     ref_count = 0
     for filename, doc in doc_groups.items():
         if filename not in referenced_files:
             continue
-        if ref_count >= 3:
+        if ref_count >= 4:
             break
         ref_count += 1
         # Use title or filename
