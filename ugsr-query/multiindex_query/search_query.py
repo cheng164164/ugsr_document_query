@@ -689,48 +689,7 @@ def llm_context_guard_check(query, context_text, client, deployment=AZURE_OPENAI
         relevance_tag = irrelevance_response.choices[0].message.content.strip().upper()
         is_completely_irrelevant = relevance_tag == "IRRELEVANT"
 
-        # Third: LLM SELECTS MOST RELEVANT DocN TAGS
-        if not is_completely_irrelevant:
-            # Use the Doc1/Doc2/... markers from the context to identify which docs are most helpful
-            tag_selection_prompt = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a document selector. The context contains multiple document chunks, "
-                        "each tagged like (Doc1), (Doc2), etc.\n"
-                        "Your task is to identify the 1 or 2 most relevant document tags.\n"
-                        "Rules:\n"
-                        "- ONLY return the tag names such as: Doc2, Doc1\n"
-                        "- Do NOT include explanations.\n"
-                        "- Do NOT return text outside the tag list."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"QUESTION:\n{query}\n\n"
-                        f"CONTEXT WITH TAGS:\n{context_text}\n\n"
-                        "Which tagged documents are most relevant? Return only tag names."
-                    )
-                }
-            ]
-
-            try:
-                tag_response = client.chat.completions.create(
-                    model=deployment,
-                    messages=tag_selection_prompt
-                )
-                raw_tag_output = tag_response.choices[0].message.content.strip()
-
-                # Extract DocN patterns from response
-                selected_doc_tags = re.findall(r"Doc\d+", raw_tag_output)
-
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to extract Doc tags from LLM: {e}")
-                selected_doc_tags = []
-
-
-    return is_valid, answer, is_completely_irrelevant, selected_doc_tags
+    return is_valid, answer, is_completely_irrelevant
 
 
 def metadata_table_by_index(index_names):
@@ -1343,47 +1302,106 @@ def multi_index_generate_response(query, context,
 
     context_str = "\n\n".join(context_texts)
 
-    is_valid, explanation, is_completely_irrelevant, selected_doc_tags = llm_context_guard_check(
+    is_valid, explanation, is_completely_irrelevant = llm_context_guard_check(
                                                                                 query, context_str, client, deployment=AZURE_OPENAI_DEPLOYMENT, strict_mode=strict_mode
                                                                             )
     explanation = ' '.join(explanation.strip().split()[1:])
-    print('LLM Context Validity Check:', f'is_valid={is_valid};\n is_completely_irrelevant={is_completely_irrelevant};\n explanation={explanation};\n referenced_doc_tags_in_explanation={selected_doc_tags}')
+    print('LLM Context Validity Check:', f'is_valid={is_valid};\n is_completely_irrelevant={is_completely_irrelevant};\n explanation={explanation};\n')
     
     # === CASE: Context not valid ===
     if not is_valid:
+        # --------------------------------------------------------
+        # PARTIALLY RELEVANT
+        # --------------------------------------------------------
+        if not is_completely_irrelevant and top_chunks:
+
+            # --- Generate best-effort answer ---
+            fallback_prompt = (
+                "You are answering a question where the documents are related but do not fully match.\n\n"
+                "Your task:\n"
+                "- First, provide the most relevant information from the documents that could help the user.\n"
+                "- This may include general policies, standard procedures, or broadly applicable rules.\n"
+                "- Do NOT refuse to answer simply because an exact match is missing.\n"
+                "- Do NOT speculate or invent details.\n"
+                "- You must reference document sources only using the format (Doc1), (Doc2), etc. Always use parentheses.\n"
+                "- You must place the reference immediately after the sentence or claim it supports. For example:\n"
+                "    • The operator must press the emergency stop button. (Doc2)\n"
+                "    • The hydraulic fluid should be replaced every 1000 hours. (Doc5)\n"
+                "- Never use \"see DocX\", \"as shown in DocX\", or any other format.\n"
+                "- Never group multiple document references together. If you are referencing more than one document, use separate tags like (Doc1), (Doc2), (Doc3) — not (Doc1, Doc2) or (Doc1 and Doc2).\n"
+                "- Do NOT use any other format like 'See Doc1', 'as shown in Doc2', 'in Doc1' or simply reference without parentheses.\n"
+                "After providing the relevant information, briefly note what specific detail is missing.\n\n"
+                f"QUESTION: {query}\n\n"
+                f"DOCUMENT CHUNKS:\n{context_str}"
+            )
+
+            completion = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                messages=[{"role": "user", "content": fallback_prompt}]
+            )
+
+            partial_answer = completion.choices[0].message.content.strip()
+
+            # --- Extract referenced DocN tags ---
+            referenced_tags = set(re.findall(r"Doc\d+", partial_answer))
+            referenced_files = {tag_lookup[tag] for tag in referenced_tags if tag in tag_lookup}
+
+            # Fallback if LLM did not cite
+            if not referenced_files and top_chunks:
+                referenced_files = {doc.get("filename", "N/A") for doc in top_chunks[:2]}
+
+            # --- Clean references from answer ---
+            partial_answer = strip_doc_references(partial_answer)
+            clean_explanation = strip_doc_references(explanation)
+
+            main_answer = (
+                f"{partial_answer}\n\n"
+                "Note: the provided documents may not clearly explain the requested information.\n"
+                f"Reason: {clean_explanation}"
+            )
+
+            # --- Build references (same as normal path) ---
+            reference_text = "\n\n**References:**\n"
+            ref_count = 0
+
+            for filename, doc in doc_groups.items():
+                if filename not in referenced_files or ref_count >= 3:
+                    continue
+
+                ref_count += 1
+
+                if show_title_in_ref and doc.get("title"):
+                    document_display = doc["title"]
+                else:
+                    document_display = title_case_filename(
+                        resolve_reference_name(doc["document_name"], supplement_files)
+                    )
+
+                url_value = resolve_reference_url(
+                    doc["document_name"],
+                    (doc.get("url") or "").split(";")[0].strip(),
+                    supplement_files
+                )
+
+                reference_text += f"\n---\n**Resource**: [{document_display}]({url_value})\n\n"
+
+                if not hide_ref_contact:
+                    reference_text += (
+                        f"**Key Contact**: {title_case_name(doc['key_contact'])}\n\n"
+                    )
+                    
+            return f"**Answer:**\n\n{main_answer}{reference_text}"
+
+        # --------------------------------------------------------
+        # ORIGINAL — COMPLETELY IRRELEVANT
+        # --------------------------------------------------------
         main_answer = (
-            "Sorry, I cannot help with that. The provided documents do not clearly explain the requested information.\n"
+            "Sorry, I cannot help with that. "
+            "The provided documents do not clearly explain the requested information.\n"
             f"(Reason: {explanation})"
         )
 
-        # Clean tag markers from explanation ((DocN), [DocN], etc.)
         main_answer = strip_doc_references(main_answer)
-
-        if not is_completely_irrelevant and top_chunks:
-            # Map selected_doc_tags -> filenames
-            recommended_filenames = {tag_lookup[tag] for tag in selected_doc_tags if tag in tag_lookup}
-
-            # Fallback to top_chunks[:2] if nothing selected
-            if recommended_filenames:
-                main_answer += ("\n\n---\n Please refer to the following document(s) for helpful information.")
-
-                for filename in list(recommended_filenames)[:2]:
-                    doc = doc_groups.get(filename, {})
-                    # Choose display title or filename
-                    if show_title_in_ref and doc.get("title"):
-                        display_name = doc["title"]
-                    else:
-                        display_name = title_case_filename(
-                            resolve_reference_name(filename, supplement_files)
-                        )
-                    url_value = resolve_reference_url(filename, (doc.get("url") or "").split(";")[0].strip(), supplement_files)
-
-                    main_answer += f"\n\n**Resource**: [{display_name}]({url_value})"
-                    if not hide_ref_contact:
-                        main_answer += f"\n\n**Key Contact**: {title_case_name(doc.get('key_contact', 'N/A'))}"
-
-        if warning_msg:
-            main_answer = f"Notice: {warning_msg.strip()}" + "\n\n" + main_answer
         return f"**Answer:**\n\n{main_answer}"
 
     # === CASE: Valid context — build answer using tags ===

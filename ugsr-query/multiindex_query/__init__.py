@@ -221,7 +221,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"🔍 Searching indexes: {search_scope} | Parallel: {parallel_flag}")
 
         def process_content_subquery(subq):
-            docs = multi_index_search_documents(cleaned_query, subq, search_scope, vector_weight=0.6, top_k=10, 
+            docs = multi_index_search_documents(cleaned_query, subq, search_scope, vector_weight=0.6, top_k=8, 
                                                                 dynamic_filtering=dynamic_filtering, 
                                                                 keywords_matching = keywords_matching,
                                                                 custom_ranking=custom_ranking,

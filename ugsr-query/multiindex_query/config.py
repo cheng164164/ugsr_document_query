@@ -95,7 +95,7 @@ supplement_files = {}
 # Aliases for each index to catch user queries that mention library/index by name
 index_aliases = {
     "business_index": ["north america", "north americas", "ameirca north", "americas north", "BDL", "AMNO"],
-    "ugsr_index": ["ugsr", "underground", "engineering"],
+    "ugsr_index": ["ugsr", "underground", "ugsr engineering", "underground engineering"],
     "ehs_index": ["ehs", "global ehs", "safety"],
     "all_regions_index": ["all regions", "all region", "regions all", "region all", "BDL", "Global"],
     "policy_center_index": ["policy center", "policy-center"]
