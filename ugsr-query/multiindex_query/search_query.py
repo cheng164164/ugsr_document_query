@@ -1427,7 +1427,7 @@ def multi_index_generate_response(query, context,
         "- Never group multiple document references together. If you are referencing more than one document, use separate tags like (Doc1), (Doc2), (Doc3) — not (Doc1, Doc2) or (Doc1 and Doc2).",
         "- Do NOT use any other format like 'See Doc1', 'as shown in Doc2', 'in Doc1' or simply reference without parentheses.",
         "- If your answer describes a process, include step-by-step instructions using bullet symbols.",
-        "- When referring to any resource, document, or tool that includes a URL in the document chunks, format it as a Markdown-style hyperlink.",
+        "- When referring to any resource, document, or tool that includes URLs or links in the document chunks, format the urls or links as Markdown-style hyperlink. If fail to generate hyperlink, then just use the raw urls. Make sure to show all the links of the tools as reference",
         "- Use plain text with no HTML.",
         "- Separate sections and lists with line breaks."
     ])
